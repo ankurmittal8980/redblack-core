@@ -221,7 +221,7 @@ function rbtpt_register_registration_type() {
 		'read_private_posts' => 'manage_options',
 		'create_posts' => 'manage_options',
 	);
-	register_post_type('rbt_webinar_registration', array(
+	register_post_type('rbt_webinar_reg', array(
 		'labels' => array(
 			'name' => 'Webinar Registrations',
 			'singular_name' => 'Webinar Registration',
@@ -256,7 +256,7 @@ function rbtpt_registration_columns($columns) {
 		'date' => 'Received',
 	);
 }
-add_filter('manage_rbt_webinar_registration_posts_columns', 'rbtpt_registration_columns');
+add_filter('manage_rbt_webinar_reg_posts_columns', 'rbtpt_registration_columns');
 
 function rbtpt_registration_column_content($column, $post_id) {
 	$meta = array(
@@ -269,12 +269,12 @@ function rbtpt_registration_column_content($column, $post_id) {
 		echo esc_html(get_post_meta($post_id, $meta[$column], true));
 	}
 }
-add_action('manage_rbt_webinar_registration_posts_custom_column', 'rbtpt_registration_column_content', 10, 2);
+add_action('manage_rbt_webinar_reg_posts_custom_column', 'rbtpt_registration_column_content', 10, 2);
 
 function rbtpt_add_registration_meta_box() {
-	add_meta_box('rbtpt-registration-details', 'Registration details', 'rbtpt_render_registration_meta_box', 'rbt_webinar_registration', 'normal', 'high');
+	add_meta_box('rbtpt-registration-details', 'Registration details', 'rbtpt_render_registration_meta_box', 'rbt_webinar_reg', 'normal', 'high');
 }
-add_action('add_meta_boxes_rbt_webinar_registration', 'rbtpt_add_registration_meta_box');
+add_action('add_meta_boxes_rbt_webinar_reg', 'rbtpt_add_registration_meta_box');
 
 function rbtpt_render_registration_meta_box($post) {
 	$fields = array(
@@ -582,7 +582,7 @@ function rbtpt_submit_to_core($payload) {
 
 function rbtpt_store_local_registration($payload, $session) {
 	$post_id = wp_insert_post(wp_slash(array(
-		'post_type' => 'rbt_webinar_registration',
+		'post_type' => 'rbt_webinar_reg',
 		'post_status' => 'private',
 		'post_title' => 'Webinar registration — ' . $session->format('Y-m-d H:i'),
 		'post_content' => '',
