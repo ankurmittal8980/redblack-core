@@ -1,0 +1,79 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: redblack
+      POSTGRES_USER: redblack
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-redblack-local-only}
+    volumes:
+      - redblack-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U redblack -d redblack"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build: .
+    command: ["node", "backend/src/migrate.js"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgres://redblack:${POSTGRES_PASSWORD:-redblack-local-only}@db:5432/redblack
+    depends_on:
+      db:
+        condition: service_healthy
+    profiles: ["tools"]
+
+  core:
+    build: .
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      PORT: 3000
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+      DATABASE_URL: postgres://redblack:${POSTGRES_PASSWORD:-redblack-local-only}@db:5432/redblack
+      DATABASE_SSL: "false"
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
+      BOOTSTRAP_TOKEN: ${BOOTSTRAP_TOKEN:-replace-before-use}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["node", "backend/src/worker.js"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgres://redblack:${POSTGRES_PASSWORD:-redblack-local-only}@db:5432/redblack
+      DATABASE_SSL: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  edge:
+    image: nginx:1.27-alpine
+    environment:
+      PUBLIC_SITE_UPSTREAM: ${PUBLIC_SITE_UPSTREAM:-host.docker.internal:3001}
+      NGINX_ENVSUBST_FILTER: ^PUBLIC_SITE_UPSTREAM$
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./deploy/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    ports:
+      - "${EDGE_PORT:-8080}:80"
+    depends_on:
+      core:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redblack-db:
+
+
