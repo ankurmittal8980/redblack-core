@@ -2,7 +2,7 @@
 /**
  * Plugin Name: RedBlack Public Tools
  * Description: Provider-neutral PAYG estimates and webinar registration for the RedBlack Tech website.
- * Version: 1.0.0
+ * Version: 1.0.1
  * Requires at least: 6.2
  * Requires PHP: 7.4
  * Author: RedBlack Tech
@@ -12,7 +12,7 @@ if (!defined('ABSPATH')) {
 	exit;
 }
 
-define('RBT_PUBLIC_TOOLS_VERSION', '1.0.0');
+define('RBT_PUBLIC_TOOLS_VERSION', '1.0.1');
 define('RBT_PUBLIC_TOOLS_FILE', __FILE__);
 define('RBT_PUBLIC_TOOLS_URL', plugin_dir_url(__FILE__));
 
@@ -105,7 +105,7 @@ function rbtpt_sanitize_options($input) {
 	foreach (rbtpt_categories() as $key => $category) {
 		$row = isset($input['rates'][$key]) && is_array($input['rates'][$key]) ? $input['rates'][$key] : array();
 		$unit = isset($row['unit']) ? sanitize_text_field($row['unit']) : $category['unit'];
-		$clean['rates'][$key]['unit'] = $unit !== '' ? mb_substr($unit, 0, 48) : $category['unit'];
+		$clean['rates'][$key]['unit'] = $unit !== '' ? substr($unit, 0, 48) : $category['unit'];
 		$clean['rates'][$key]['provider_rate'] = rbtpt_clean_amount(isset($row['provider_rate']) ? $row['provider_rate'] : '');
 		$clean['rates'][$key]['internal_cost'] = rbtpt_clean_amount(isset($row['internal_cost']) ? $row['internal_cost'] : '');
 		$clean['rates'][$key]['markup_pct'] = rbtpt_clean_amount(isset($row['markup_pct']) ? $row['markup_pct'] : '', 10000);
