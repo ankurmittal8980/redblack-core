@@ -201,20 +201,20 @@
 
 			if (incomplete) {
 				results.appendChild(element('p', 'rbt-alert', 'One or more categories with usage need rates configured. The displayed total excludes unconfigured categories and must not be used as a quote.'));
-			} else {
-				var cta = element('div', 'wp-block-buttons rbt-result-cta');
-				var talkButton = element('div', 'wp-block-button');
-				var consultButton = element('div', 'wp-block-button is-style-outline');
-				var talk = element('a', 'wp-block-button__link wp-element-button', 'Talk to RedBlack Tech');
-				talk.href = '/contact/';
-				var consult = element('a', 'wp-block-button__link wp-element-button', 'Book a Consultation');
-				consult.href = '/book-a-consultation/';
-				talkButton.appendChild(talk);
-				consultButton.appendChild(consult);
-				cta.appendChild(talkButton);
-				cta.appendChild(consultButton);
-				results.appendChild(cta);
 			}
+
+			var cta = element('div', 'wp-block-buttons rbt-result-cta');
+			var talkButton = element('div', 'wp-block-button');
+			var consultButton = element('div', 'wp-block-button is-style-outline');
+			var talk = element('a', 'wp-block-button__link wp-element-button', 'Talk to RedBlack Tech');
+			talk.href = '/contact/';
+			var consult = element('a', 'wp-block-button__link wp-element-button', 'Book a Consultation');
+			consult.href = '/book-a-consultation/';
+			talkButton.appendChild(talk);
+			consultButton.appendChild(consult);
+			cta.appendChild(talkButton);
+			cta.appendChild(consultButton);
+			results.appendChild(cta);
 		}
 
 		form.addEventListener('submit', function (event) {
