@@ -1,31 +1,16 @@
-# RedBlack Core — Implementation Status
+# Implementation status
 
-## Current state
-- Website remains the public RedBlack Tech surface.
-- RedBlack Core is the production application/backend foundation.
-- Google Sheet + Apps Script are migration/reference sources only.
-- Convo360 is intentionally not integrated.
-- External communication and AI providers remain provider-neutral and PAYG-oriented.
-- CRM is planned under the same public domain using the `/app` application path.
+This change completes the RedBlack Core application foundation after the CRM schema migration.
 
-## Implemented in this phase
-- PostgreSQL-oriented production schema covering workspaces, users/memberships, leads, pipelines/stages/history, assignments, tasks, activities, calls, meetings, opportunities, proposals, automations/runs/actions, normalized communications, usage, billing and audit records.
-- Indexing and tenant-scoping requirements are defined in the migration.
+- Backend/API: native Node HTTP service with `/api/v1`, a served `/app/`, `/health`, and an OpenAPI document at `/api/v1/openapi.json`.
+- Identity: password login, first-owner bootstrap, secure sessions, active workspace selection, CSRF, rate limits, RBAC, and tenant-scoped records.
+- CRM: leads, stages, pipelines, assignments, tasks, activities, meetings, calls, and reports.
+- Communications: provider-neutral registries for email, WhatsApp, RCS, and calling. Core has no configured provider and contains no Convo360 integration.
+- Automation: immutable workflow versions, idempotent queued runs, replay-safe action records, and a worker with retry handling.
+- PAYG: versioned Core-managed rates, fixed-point quote calculation, append-only usage ledger, and usage adjustments.
+- Migration: preview-first, idempotent `LEADS`/`TASKS`/`CALENDAR` CSV importer using the approved legacy mapping.
+- Operations: containers, one-domain edge routing, environment templates, CI, migration verification, dependency audit, and deployment runbook.
 
-## Required next implementation order
-1. Database environment/configuration and migration runner.
-2. Authentication + workspace membership/RBAC.
-3. Leads API + duplicate detection + assignments.
-4. Pipeline/stage API + stage history.
-5. Tasks/activities/meetings API.
-6. Communication adapter interfaces (Email/WhatsApp/RCS/Voice) without provider lock-in.
-7. Calling adapter interface and call-event ingestion.
-8. Automation engine primitives and idempotent execution.
-9. Usage metering and cost calculator.
-10. Reporting API.
-11. CRM web application under `/app`.
-12. Google Sheet migration importer and reconciliation.
-13. End-to-end tests, security review and deployment environments.
+The remaining release gates are PR review/merge, a staging rehearsal using the real sheet export, and production infrastructure configuration.
 
-## Review gates
-Only stop for user review when an architecture/security decision materially changes the approved design or when a PR is ready to merge into `main`.
+

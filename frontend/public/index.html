@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>RedBlack Core</title>
+  <link rel="stylesheet" href="/app/styles.css">
+</head>
+<body>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <main id="authView" class="auth-page">
+    <section class="auth-card" aria-labelledby="authTitle">
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">RB</span>
+        <span class="brand-name">REDBLACK <span>CORE</span></span>
+      </div>
+      <p class="eyebrow">CUSTOMER RELATIONSHIP PLATFORM</p>
+      <h1 id="authTitle">Sign in to your workspace</h1>
+      <p class="muted">Your team, follow-ups and pipeline in one place.</p>
+      <form id="loginForm" class="form-stack">
+        <label>Email address<input name="email" type="email" autocomplete="username" required maxlength="320"></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+        <div id="workspaceChoiceWrap" class="hidden">
+          <label>Workspace<select id="workspaceChoice" name="workspaceId"></select></label>
+          <button class="button button-primary full-width" type="button" id="selectWorkspaceButton">Continue to workspace</button>
+        </div>
+        <button class="button button-primary full-width" type="submit" id="loginButton">Sign in</button>
+      </form>
+      <button class="text-button" id="showSetupButton" type="button">Set up the first workspace</button>
+      <form id="setupForm" class="form-stack hidden">
+        <div class="divider"></div>
+        <h2>Initial workspace setup</h2>
+        <p class="muted small">Use the one-time bootstrap token configured by your administrator.</p>
+        <label>Setup token<input name="bootstrapToken" type="password" autocomplete="off" required></label>
+        <label>Your name<input name="displayName" autocomplete="name" required maxlength="120"></label>
+        <label>Work email<input name="email" type="email" autocomplete="email" required maxlength="320"></label>
+        <label>Password<input name="password" type="password" autocomplete="new-password" required minlength="12" maxlength="1024"></label>
+        <label>Workspace name<input name="workspaceName" required maxlength="120" value="RedBlack Group"></label>
+        <label>Workspace URL name<input name="workspaceSlug" required pattern="[a-z0-9]+(?:-[a-z0-9]+)*" value="redblack-group"></label>
+        <button class="button button-primary full-width" type="submit">Create owner workspace</button>
+      </form>
+      <p class="auth-footnote">Opportunities. Assets. Growth.</p>
+    </section>
+  </main>
+
+  <div id="appView" class="app-shell hidden">
+    <aside class="sidebar">
+      <a class="brand-lockup sidebar-brand" href="/app/" aria-label="RedBlack Core home">
+        <span class="brand-mark" aria-hidden="true">RB</span>
+        <span class="brand-name">REDBLACK <span>CORE</span></span>
+      </a>
+      <label class="workspace-picker">WORKSPACE<select id="workspacePicker" aria-label="Choose workspace"></select></label>
+      <nav id="mainNav" class="main-nav" aria-label="Main navigation">
+        <button data-view="dashboard" class="nav-item active"><span class="nav-glyph">▦</span>Overview</button>
+        <button data-view="leads" class="nav-item"><span class="nav-glyph">◉</span>Leads</button>
+        <button data-view="pipelines" class="nav-item"><span class="nav-glyph">▥</span>Pipelines</button>
+        <button data-view="tasks" class="nav-item"><span class="nav-glyph">✓</span>Tasks</button>
+        <button data-view="communications" class="nav-item"><span class="nav-glyph">✉</span>Communications</button>
+        <button data-view="calling" class="nav-item"><span class="nav-glyph">⌕</span>Calling</button>
+        <button data-view="automations" class="nav-item"><span class="nav-glyph">⟳</span>Automations</button>
+        <button data-view="usage" class="nav-item"><span class="nav-glyph">₹</span>Usage &amp; cost</button>
+        <button data-view="reports" class="nav-item"><span class="nav-glyph">⌁</span>Reports</button>
+        <button data-view="workspace" class="nav-item"><span class="nav-glyph">⚙</span>Workspace</button>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="sidebar-caption">RED BLACK TECH</div>
+        <div class="sidebar-tagline">Opportunities.<br>Assets. Growth.</div>
+      </div>
+    </aside>
+
+    <div class="main-column">
+      <header class="topbar">
+        <div class="topbar-context"><span class="status-dot"></span><span id="topWorkspaceName">Workspace</span></div>
+        <div class="topbar-user"><span id="userBadge" class="avatar">RB</span><span id="userLabel">Team member</span><button id="logoutButton" class="text-button">Sign out</button></div>
+      </header>
+      <main id="viewRoot" class="content" tabindex="-1"></main>
+      <footer class="app-footer"><span>RedBlack Core</span><span>Private workspace · Activity is audited</span></footer>
+    </div>
+  </div>
+  <script type="module" src="/app/app.js"></script>
+</body>
+</html>
+
