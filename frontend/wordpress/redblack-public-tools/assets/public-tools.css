@@ -1,0 +1,463 @@
+.rbt-tool,
+.rbt-tool * {
+	box-sizing: border-box;
+}
+
+.rbt-tool {
+	width: 100%;
+	max-width: 1040px;
+	margin: 0 auto;
+	color: var(--fg, #f5f5f5);
+	overflow-wrap: anywhere;
+}
+
+.rbt-panel {
+	min-width: 0;
+	padding: clamp(22px, 4vw, 36px);
+	border: 1px solid var(--line, #303033);
+	border-radius: var(--radius-lg, 16px);
+	background: var(--bg-2, #111113);
+}
+
+.rbt-panel h2,
+.rbt-panel h3,
+.rbt-panel h4 {
+	color: inherit;
+}
+
+.rbt-panel > :first-child {
+	margin-top: 0;
+}
+
+.rbt-eyebrow {
+	margin: 0 0 8px;
+	color: var(--red, #e31b23);
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: .14em;
+	text-transform: uppercase;
+}
+
+.rbt-calculator .rbt-panel > p:not(.rbt-eyebrow):not(.rbt-disclaimer) {
+	max-width: 700px;
+	color: var(--fg-2, #a1a1aa);
+}
+
+.rbt-usage-grid,
+.rbt-form-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 16px;
+	margin: 24px 0;
+}
+
+.rbt-field {
+	display: block;
+	min-width: 0;
+}
+
+.rbt-field > span {
+	display: block;
+	margin-bottom: 7px;
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 1.45;
+}
+
+.rbt-field small {
+	color: var(--fg-2, #a1a1aa);
+	font-size: 12px;
+	font-weight: 400;
+}
+
+.rbt-field b,
+.rbt-consent b {
+	color: var(--red, #e31b23);
+}
+
+.rbt-field input,
+.rbt-field select,
+.rbt-field textarea {
+	display: block;
+	width: 100%;
+	min-width: 0;
+	max-width: 100%;
+	padding: 12px 13px;
+	border: 1px solid var(--line, #303033);
+	border-radius: var(--radius, 10px);
+	background: var(--bg, #080809);
+	color: var(--fg, #f5f5f5);
+	font: inherit;
+	font-size: 16px;
+	line-height: 1.4;
+}
+
+.rbt-field input:focus,
+.rbt-field select:focus,
+.rbt-field textarea:focus {
+	outline: 2px solid var(--red, #e31b23);
+	outline-offset: 2px;
+}
+
+.rbt-field--wide {
+	grid-column: 1 / -1;
+}
+
+.rbt-tool button.wp-element-button {
+	max-width: 100%;
+	padding: 14px 20px;
+	border: 1px solid var(--red, #e31b23);
+	border-radius: var(--radius, 10px);
+	background: var(--red, #e31b23);
+	color: #fff;
+	font: inherit;
+	font-size: 14px;
+	font-weight: 700;
+	line-height: 1.3;
+	text-align: center;
+	text-decoration: none;
+	cursor: pointer;
+	transition: background-color .2s ease, border-color .2s ease;
+}
+
+.rbt-tool button.wp-element-button:hover {
+	border-color: var(--red-hover, #c9151c);
+	background: var(--red-hover, #c9151c);
+}
+
+.rbt-tool button.wp-element-button:disabled {
+	cursor: wait;
+	opacity: .7;
+}
+
+.rbt-disclaimer,
+.rbt-form-note,
+.rbt-schedule-note {
+	margin: 20px 0 0;
+	color: var(--fg-2, #a1a1aa);
+	font-size: 13px;
+	line-height: 1.6;
+}
+
+.rbt-internal-note {
+	margin: 14px 0 0;
+	color: var(--fg-2, #a1a1aa);
+	font-size: 12px;
+}
+
+.rbt-results {
+	display: block;
+	margin-top: 20px;
+}
+
+.rbt-results[hidden],
+.rbt-registration-form[hidden],
+.rbt-registration-success[hidden] {
+	display: none !important;
+}
+
+.rbt-results > h3 {
+	margin: 0 0 14px;
+	font-size: clamp(1.35rem, 3vw, 1.75rem);
+}
+
+.rbt-summary-grid,
+.rbt-unit-costs,
+.rbt-breakdown-grid {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 10px;
+}
+
+.rbt-summary-grid,
+.rbt-unit-costs {
+	margin: 0 0 18px;
+}
+
+.rbt-metric {
+	display: flex;
+	min-width: 0;
+	flex-direction: column;
+	gap: 5px;
+	padding: 14px;
+	border: 1px solid var(--line, #303033);
+	border-radius: var(--radius, 10px);
+	background: rgba(255, 255, 255, .035);
+}
+
+.rbt-metric--emphasis {
+	border-color: rgba(227, 27, 35, .62);
+	background: rgba(227, 27, 35, .08);
+}
+
+.rbt-metric__label {
+	color: var(--fg-2, #a1a1aa);
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 1.35;
+}
+
+.rbt-metric__value {
+	color: var(--fg, #f5f5f5);
+	font-size: 15px;
+	line-height: 1.35;
+	overflow-wrap: anywhere;
+}
+
+.rbt-breakdown-list {
+	display: grid;
+	gap: 10px;
+}
+
+.rbt-breakdown-card {
+	min-width: 0;
+	padding: 16px;
+	border: 1px solid var(--line, #303033);
+	border-radius: var(--radius, 10px);
+	background: var(--bg-2, #111113);
+}
+
+.rbt-breakdown-card__top {
+	display: flex;
+	min-width: 0;
+	flex-wrap: wrap;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 6px 14px;
+	margin-bottom: 12px;
+}
+
+.rbt-breakdown-card__top h4 {
+	margin: 0;
+	font-size: 16px;
+}
+
+.rbt-quantity {
+	color: var(--fg-2, #a1a1aa);
+	font-size: 12px;
+}
+
+.rbt-breakdown-grid .rbt-metric {
+	padding: 10px;
+}
+
+.rbt-breakdown-grid .rbt-metric__value {
+	font-size: 13px;
+}
+
+.rbt-alert {
+	margin: 16px 0 0;
+	padding: 13px 15px;
+	border: 1px solid rgba(227, 27, 35, .65);
+	border-radius: var(--radius, 10px);
+	background: rgba(227, 27, 35, .08);
+	color: inherit;
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+.rbt-result-cta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	margin-top: 18px;
+}
+
+.rbt-result-cta .wp-block-button__link {
+	display: inline-flex;
+	max-width: 100%;
+	align-items: center;
+	justify-content: center;
+	padding: 12px 17px;
+	border: 1px solid var(--red, #e31b23);
+	border-radius: var(--radius, 10px);
+	background: var(--red, #e31b23);
+	color: #fff;
+	font-size: 13px;
+	font-weight: 700;
+	line-height: 1.35;
+	text-align: center;
+	text-decoration: none;
+}
+
+.rbt-result-cta .wp-block-button__link.is-style-outline {
+	border-color: var(--line, #303033);
+	background: transparent;
+}
+
+.rbt-webinar {
+	display: grid;
+	gap: clamp(22px, 4vw, 36px);
+}
+
+.rbt-webinar-intro {
+	min-width: 0;
+}
+
+.rbt-webinar-intro > h2 {
+	max-width: 820px;
+	font-size: clamp(2rem, 5vw, 3.25rem);
+	letter-spacing: -.02em;
+	line-height: 1.1;
+}
+
+.rbt-lead {
+	max-width: 760px;
+	color: var(--fg-2, #a1a1aa);
+	font-size: clamp(1.05rem, 2vw, 1.2rem);
+	line-height: 1.65;
+}
+
+.rbt-webinar-columns {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 16px;
+	margin-top: 22px;
+}
+
+.rbt-info-card h3 {
+	margin-bottom: 12px;
+	font-size: 20px;
+}
+
+.rbt-info-card ul {
+	margin: 0;
+	padding-left: 20px;
+	color: var(--fg-2, #a1a1aa);
+}
+
+.rbt-info-card li {
+	padding: 5px 0;
+	line-height: 1.55;
+}
+
+.rbt-registration-panel {
+	scroll-margin-top: 24px;
+}
+
+.rbt-registration-panel h2 {
+	margin-top: 0;
+}
+
+.rbt-consent {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	min-width: 0;
+	font-size: 13px;
+	line-height: 1.55;
+}
+
+.rbt-consent input {
+	flex: 0 0 auto;
+	width: 18px;
+	height: 18px;
+	margin-top: 1px;
+	accent-color: var(--red, #e31b23);
+}
+
+.rbt-consent a {
+	color: var(--fg, #f5f5f5);
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.rbt-honeypot {
+	position: absolute !important;
+	width: 1px !important;
+	height: 1px !important;
+	overflow: hidden !important;
+	clip: rect(0, 0, 0, 0) !important;
+	white-space: nowrap !important;
+}
+
+.rbt-form-status {
+	min-height: 1.4em;
+	margin: 12px 0 0;
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+.rbt-form-status--error {
+	color: #ff9aa0;
+}
+
+.rbt-registration-success {
+	padding-top: 8px;
+}
+
+.rbt-success-label {
+	margin: 0;
+	color: var(--red, #e31b23);
+	font-size: 12px;
+	font-weight: 700;
+	letter-spacing: .14em;
+	text-transform: uppercase;
+}
+
+.rbt-registration-success h3 {
+	margin: 8px 0;
+	font-size: clamp(1.5rem, 4vw, 2rem);
+}
+
+.rbt-registration-success > p:not(.rbt-success-label) {
+	color: var(--fg-2, #a1a1aa);
+	line-height: 1.6;
+}
+
+.rbt-registration-success .wp-block-buttons {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin-top: 18px;
+}
+
+.rbt-registration-success .wp-block-button {
+	margin: 0;
+}
+
+.rbt-registration-success .wp-block-button__link {
+	max-width: 100%;
+	white-space: normal;
+}
+
+@media (max-width: 781px) {
+	.rbt-usage-grid,
+	.rbt-form-grid,
+	.rbt-webinar-columns {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.rbt-field--wide {
+		grid-column: auto;
+	}
+
+	.rbt-summary-grid,
+	.rbt-unit-costs {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.rbt-breakdown-grid {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.rbt-result-cta .wp-block-button__link {
+		width: 100%;
+	}
+}
+
+@media (max-width: 420px) {
+	.rbt-panel {
+		padding: 18px;
+	}
+
+	.rbt-breakdown-grid {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.rbt-tool button.wp-element-button,
+	.rbt-result-cta .wp-block-button__link {
+		width: 100%;
+	}
+}
+
