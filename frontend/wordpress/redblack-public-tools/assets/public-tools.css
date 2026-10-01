@@ -280,7 +280,7 @@
 	text-decoration: none;
 }
 
-.rbt-result-cta .wp-block-button__link.is-style-outline {
+.rbt-result-cta .wp-block-button.is-style-outline .wp-block-button__link {
 	border-color: var(--line, #303033);
 	background: transparent;
 }
