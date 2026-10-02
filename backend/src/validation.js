@@ -105,6 +105,18 @@ export function decimalToUnits(value, scale = 8) {
   return negative ? -units : units;
 }
 
+export function decimal(value, field, { min = null, max = null, scale = 8 } = {}) {
+  try {
+    const units = decimalToUnits(value, scale);
+    if (min !== null && units < decimalToUnits(min, scale)) throw new ValidationError(`${field} must be at least ${min}.`, field);
+    if (max !== null && units > decimalToUnits(max, scale)) throw new ValidationError(`${field} must be at most ${max}.`, field);
+    return unitsToDecimal(units, scale);
+  } catch (error) {
+    if (error instanceof ValidationError) throw new ValidationError(error.message.replace(/^amount/, field), field);
+    throw error;
+  }
+}
+
 export function unitsToDecimal(units, scale = 8) {
   const value = BigInt(units);
   const negative = value < 0n;
