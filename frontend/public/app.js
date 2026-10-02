@@ -74,7 +74,7 @@ function switchToApp(session) {
   $('#userLabel').textContent = session.user.displayName ?? session.user.email;
   $('#userBadge').textContent = (session.user.displayName ?? session.user.email).split(/[\s@]/).filter(Boolean).slice(0, 2).map(part => part[0]).join('').toUpperCase();
   $('#topWorkspaceName').textContent = session.workspace?.name ?? 'Choose workspace';
-  loadWorkspaces().then(() => session.workspace ? loadView(appState.view) : chooseWorkspaceView());
+  loadWorkspaces().then(() => session.workspace ? renderView(appState.view) : chooseWorkspaceView());
 }
 
 async function loadWorkspaces() {

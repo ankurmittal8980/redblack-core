@@ -952,7 +952,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             const [leads, meetings] = await Promise.all([
               db.query(
                 `SELECT COUNT(*) AS total_leads,
-                        COUNT(*) FILTER (WHERE lower(COALESCE(temperature,''))='hot' OR upper(COALESCE(status,''))='HOT') AS hot,
+                        COUNT(*) FILTER (WHERE lower(COALESCE(temperature::text,''))='hot' OR upper(COALESCE(status,''))='HOT') AS hot,
                         COUNT(*) FILTER (WHERE upper(COALESCE(status,''))='WON') AS won,
                         COUNT(*) FILTER (WHERE upper(COALESCE(status,''))='LOST') AS lost
                    FROM leads WHERE workspace_id=$1 AND deleted_at IS NULL`, [workspaceId]
