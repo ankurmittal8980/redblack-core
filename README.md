@@ -1,35 +1,44 @@
 # RedBlack Core
 
-RedBlack Core is the central platform for Red Black Tech's CRM, automation, AI, communications, and billing capabilities.
+RedBlack Core is the workspace-scoped CRM and operations platform for Red Black Tech. It serves the CRM UI at `/app/` and the versioned API at `/api/v1/` under the same domain as the public site.
 
-## Architecture
+## Included capabilities
 
-The platform's system boundaries and initial decisions are documented in [docs/architecture.md](docs/architecture.md).
+- Secure first-owner setup, password login, workspace membership, RBAC, CSRF protection, and audit records.
+- Leads, pipelines, stage history, assignments, tasks, activities, meetings, calls, and workspace reports.
+- Provider-neutral email, WhatsApp, RCS, and voice boundaries. No provider account, subscription, or Convo360 integration is included.
+- Immutable automation versions with replay-safe runs and a separate worker.
+- Versioned PAYG rate cards, fixed-point estimates, and append-only usage records.
+- Preview-first Google Sheet CSV migration that preserves the approved source mapping and supports idempotent replay.
 
-The RedBlack Database is the source of truth. Google Sheets and Apps Script remain migration references for importing existing data and preserving established logic; they are not the CRM.
+## Local setup
 
-## Repository layout
+Copy `.env.example` to a local environment file. Then run the migration and stack:
 
-- `docs/` — architecture and product/engineering documentation
-- `backend/` — API and application services
-- `frontend/` — user-facing applications
-- `database/` — schema, migrations, and seed data
-- `integrations/` — external system connectors and provider adapters
-- `automation/` — workflow definitions and execution engine
-- `ai/` — AI gateway and policy boundary
-- `billing/` — usage, plans, invoices, and billing logic
-- `tests/` — automated test suites
+```text
+docker compose --profile tools run --rm migrate
+docker compose up --build
+```
 
-Empty directories use `.gitkeep` files until implementation files are added.
+Open `http://localhost:8080/app/`. The first owner setup requires the local `BOOTSTRAP_TOKEN`. Rotate it after setup.
 
-## Provider strategy
+For a non-container workflow, use `pnpm install`, `pnpm migrate`, `pnpm start`, and `pnpm worker` with PostgreSQL 17 available through `DATABASE_URL`.
 
-The first architecture defines RedBlack adapters for Email, WhatsApp, RCS, Voice, and AI. Concrete providers are intentionally left open.
+## Validation
 
-## Configuration
+```text
+pnpm run check
+```
 
-Copy `.env.example` to a local environment file and fill in values for the selected development setup. Never commit secrets.
+The test suite covers application helpers locally and applies both migrations against PostgreSQL 17 in CI. The runtime OpenAPI document is available at `/api/v1/openapi.json`.
 
-## Status
+## Documentation
 
-Architecture baseline only. Implementation frameworks, hosting platforms, and external providers remain to be selected in later tasks.
+- [Architecture](docs/architecture.md)
+- [API contract](docs/api-v1-contract.md)
+- [Sheet migration](docs/google-sheet-migration.md)
+- [Security model](docs/security.md)
+- [Deployment environments](docs/deployment.md)
+- [Implementation status](docs/implementation-status.md)
+
+
