@@ -405,7 +405,7 @@ $('#viewRoot').addEventListener('submit', async event => {
       showToast(`Automation saved as version 1${result.active ? ' and activated' : ''}.`); await renderAutomations();
     } else if (form.id === 'estimateForm') {
       const estimate = await api(workspacePath('usage/estimate'), { method: 'POST', body: { ...input, quantity: Number(input.quantity) } });
-      $('#estimateResult').innerHTML = `<div class="notice notice-green">Estimated provider cost: <strong>${fmtMoney(estimate.providerCost, estimate.currency)}</strong> · Customer charge: <strong>${fmtMoney(estimate.customerCharge, estimate.currency)}</strong> · Rate ${escapeHtml(estimate.rateId.slice(0,8)}</div>`;
+      $('#estimateResult').innerHTML = `<div class="notice notice-green">Estimated provider cost: <strong>${fmtMoney(estimate.providerCost, estimate.currency)}</strong> · Customer charge: <strong>${fmtMoney(estimate.customerCharge, estimate.currency)}</strong> · Rate ${escapeHtml(estimate.rateId.slice(0, 8))}</div>`;
     } else if (form.id === 'rateForm') {
       const rate = { ...input, provider: input.provider || null, providerCostPerUnit: Number(input.providerCostPerUnit), customerChargePerUnit: Number(input.customerChargePerUnit), validFrom: input.validFrom ? localDateTime(input.validFrom) : null };
       await api(workspacePath('usage/rates'), { method: 'POST', body: rate }); showToast('Rate version published.'); await renderUsage();
