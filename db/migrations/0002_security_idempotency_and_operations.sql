@@ -9,6 +9,7 @@ ALTER TABLE leads ADD COLUMN owner_user_id uuid REFERENCES users(id) ON DELETE S
 ALTER TABLE calls ADD COLUMN answered_at timestamptz;
 ALTER TABLE calls ADD COLUMN idempotency_key text;
 ALTER TABLE calls ADD COLUMN provider_event_at timestamptz;
+ALTER TABLE messages ADD COLUMN provider_event_at timestamptz;
 ALTER TABLE calls ADD CONSTRAINT calls_duration_nonnegative CHECK (duration_seconds >= 0);
 CREATE UNIQUE INDEX calls_workspace_idempotency_key ON calls(workspace_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 ALTER TABLE tasks ADD COLUMN task_type text;
@@ -23,6 +24,7 @@ ALTER TABLE meetings ADD COLUMN migration_source_id text;
 ALTER TABLE meetings ADD COLUMN migration_payload jsonb NOT NULL DEFAULT '{}'::jsonb;
 ALTER TABLE meetings ADD CONSTRAINT meetings_migration_source_key
   UNIQUE (workspace_id, migration_source, migration_source_id);
+ALTER TABLE meetings ADD CONSTRAINT meetings_end_after_start CHECK (ends_at IS NULL OR ends_at >= starts_at);
 
 ALTER TABLE leads ADD CONSTRAINT leads_workspace_id_id_key UNIQUE (workspace_id, id);
 ALTER TABLE lead_sources ADD CONSTRAINT lead_sources_workspace_id_id_key UNIQUE (workspace_id, id);
@@ -339,6 +341,10 @@ CREATE INDEX leads_workspace_created_idx ON leads(workspace_id, created_at DESC,
 CREATE INDEX leads_workspace_owner_idx ON leads(workspace_id, owner_user_id, created_at DESC);
 CREATE INDEX tasks_workspace_assignee_status_due_idx ON tasks(workspace_id, assigned_to, status, due_at);
 CREATE INDEX messages_workspace_lead_time_idx ON messages(workspace_id, lead_id, created_at DESC);
+CREATE INDEX messages_workspace_time_idx ON messages(workspace_id, created_at DESC);
+CREATE INDEX messages_workspace_provider_event_idx ON messages(workspace_id, provider_event_at DESC);
+CREATE INDEX activities_workspace_time_idx ON activities(workspace_id, occurred_at DESC);
+CREATE INDEX calls_workspace_time_idx_v2 ON calls(workspace_id, started_at DESC);
 CREATE INDEX automation_runs_queue_idx ON automation_runs(status, retry_after, started_at, created_at) WHERE status IN ('queued', 'running');
 CREATE INDEX meetings_workspace_start_idx ON meetings(workspace_id, starts_at);
 CREATE INDEX opportunities_workspace_status_idx ON opportunities(workspace_id, status, expected_close_date);
