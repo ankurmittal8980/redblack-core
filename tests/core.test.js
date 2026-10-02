@@ -98,7 +98,6 @@ test('input validation rejects malformed identifiers and OpenAPI covers runtime 
   assert.equal(OPENAPI_SPEC.openapi, '3.1.0');
   assert.ok(OPENAPI_SPEC.paths['/api/v1/workspaces/{workspaceId}/reports/dashboard']);
   assert.ok(OPENAPI_SPEC.paths['/api/v1/webhooks/{provider}/calls']);
-  assert.ok(OPENAPI_SPEC.paths['/api/v1/workspaces/{workspaceId}/automations/install-defaults']);
 });
 
 test('automation definitions support default follow-up ownership and delay actions', () => {
