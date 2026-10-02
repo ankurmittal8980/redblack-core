@@ -12,7 +12,7 @@ import { hashPassword, verifyPassword, hashToken, safeEqual } from './password.j
 import { requirePermission } from './rbac.js';
 import { loginByIp, loginByEmail, bootstrapByIp } from './rate-limit.js';
 import { quoteUsage } from './pricing.js';
-import { ValidationError, objectBody, requiredString, optionalString, uuid, enumValue, finiteNumber, isoDate, slug, normalizeEmail, normalizePhone, parseCursor, makeCursor } from './validation.js';
+import { ValidationError, decimal, objectBody, requiredString, optionalString, uuid, enumValue, finiteNumber, isoDate, slug, normalizeEmail, normalizePhone, parseCursor, makeCursor } from './validation.js';
 import { communications, calling } from './providers.js';
 import { OPENAPI_SPEC } from './openapi.js';
 
@@ -116,7 +116,14 @@ async function workspaceSeeds(db, workspaceId) {
   }
 }
 
-function ipOf(request) { return request.socket.remoteAddress ?? 'unknown'; }
+function ipOf(request) {
+  // The container is private behind the managed edge. Only enable this when that edge replaces X-Real-IP.
+  if (config.trustProxy) {
+    const forwarded = String(request.headers['x-real-ip'] ?? '').trim();
+    if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(forwarded) || /^[0-9a-f:]+$/i.test(forwarded)) return forwarded;
+  }
+  return request.socket.remoteAddress ?? 'unknown';
+}
 
 function setRateLimit(response, result) {
   if (!result.allowed) {
@@ -606,6 +613,17 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           sendJson(response, 201, result.rows[0]); return;
         }
         const pipelineMatch = suffix.match(/^pipelines\/([^/]+)(?:\/(.*))?$/);
+        if (pipelineMatch && request.method === 'PATCH' && !pipelineMatch[2]) {
+          requirePermission(context, 'workspace:manage'); const pipelineId = uuid(pipelineMatch[1], 'pipelineId'); const input = await body();
+          const fields = []; const values = [workspaceId, pipelineId];
+          if (input.name !== undefined) { values.push(requiredString(input.name, 'name', { max: 120 })); fields.push(`name=$${values.length}`); }
+          if (input.slug !== undefined) { values.push(slug(input.slug)); fields.push(`slug=$${values.length}`); }
+          if (input.active !== undefined) { if (typeof input.active !== 'boolean') throw new ValidationError('active must be a boolean.'); values.push(input.active); fields.push(`active=$${values.length}`); }
+          if (!fields.length) throw new HttpError(400, 'NO_FIELDS', 'Provide name, slug or active.');
+          const result = await db.query(`UPDATE pipelines SET ${fields.join(', ')} WHERE workspace_id=$1 AND id=$2 RETURNING id,name,slug,active`, values);
+          if (!result.rows[0]) throw new HttpError(404, 'PIPELINE_NOT_FOUND', 'Pipeline was not found.');
+          await audit(db, { workspaceId, actorUserId: current.userId, action: 'pipeline.updated', entityType: 'pipeline', entityId: pipelineId, request }); sendJson(response, 200, result.rows[0]); return;
+        }
         if (pipelineMatch && request.method === 'POST' && pipelineMatch[2] === 'stages') {
           requirePermission(context, 'workspace:manage'); const pipelineId = uuid(pipelineMatch[1], 'pipelineId'); const input = await body();
           const name = requiredString(input.name, 'name', { max: 120 }); const stageSlug = slug(input.slug);
@@ -619,6 +637,34 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           if (!result.rows[0]) throw new HttpError(404, 'PIPELINE_NOT_FOUND', 'Pipeline was not found.');
           sendJson(response, 201, result.rows[0]); return;
         }
+        if (pipelineMatch && request.method === 'PATCH' && /^stages\//.test(pipelineMatch[2] ?? '')) {
+          requirePermission(context, 'workspace:manage'); const pipelineId = uuid(pipelineMatch[1], 'pipelineId'); const stageId = uuid(pipelineMatch[2].slice('stages/'.length), 'stageId'); const input = await body();
+          const fields = []; const values = [pipelineId, stageId, workspaceId];
+          if (input.name !== undefined) { values.push(requiredString(input.name, 'name', { max: 120 })); fields.push(`name=$${values.length}`); }
+          if (input.slug !== undefined) { values.push(slug(input.slug)); fields.push(`slug=$${values.length}`); }
+          if (input.position !== undefined) { values.push(Math.trunc(finiteNumber(input.position, 'position', { min: 0, max: 10000 }))); fields.push(`position=$${values.length}`); }
+          if (input.isWon !== undefined) { if (typeof input.isWon !== 'boolean') throw new ValidationError('isWon must be a boolean.'); values.push(input.isWon); fields.push(`is_won=$${values.length}`); }
+          if (input.isLost !== undefined) { if (typeof input.isLost !== 'boolean') throw new ValidationError('isLost must be a boolean.'); values.push(input.isLost); fields.push(`is_lost=$${values.length}`); }
+          if (!fields.length) throw new HttpError(400, 'NO_FIELDS', 'Provide stage fields.');
+          const result = await db.query(`UPDATE pipeline_stages s SET ${fields.join(', ')} FROM pipelines p WHERE s.pipeline_id=$1 AND s.id=$2 AND p.workspace_id=$3 AND p.id=s.pipeline_id RETURNING s.id,s.name,s.slug,s.position,s.is_won,s.is_lost`, values);
+          if (!result.rows[0]) throw new HttpError(404, 'STAGE_NOT_FOUND', 'Stage was not found.'); sendJson(response, 200, result.rows[0]); return;
+        }
+        if (suffix === 'custom-fields' && request.method === 'GET') {
+          requirePermission(context, 'crm:read'); const result = await db.query('SELECT id, entity_type, field_key, label, field_type, required, config, created_at FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type=$2 ORDER BY created_at', [workspaceId, url.searchParams.get('entityType') ?? 'lead']); sendJson(response, 200, { data: result.rows }); return;
+        }
+        if (suffix === 'custom-fields' && request.method === 'POST') {
+          requirePermission(context, 'workspace:manage'); const input = await body(); const result = await db.query('INSERT INTO custom_field_definitions(workspace_id, entity_type, field_key, label, field_type, required, config) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING *', [workspaceId, enumValue(input.entityType ?? 'lead', 'entityType', ['lead']), requiredString(input.fieldKey, 'fieldKey', { max: 80 }).toLowerCase(), requiredString(input.label, 'label', { max: 160 }), enumValue(input.fieldType ?? 'text', 'fieldType', ['text','number','date','boolean','select','multiselect']), booleanInput(input.required, 'required'), JSON.stringify(input.config ?? {})]); sendJson(response, 201, result.rows[0]); return;
+        }
+        const fieldMatch = suffix.match(/^custom-fields\/([^/]+)$/);
+        if (fieldMatch && request.method === 'PATCH') {
+          requirePermission(context, 'workspace:manage'); const input = await body(); const fieldId = uuid(fieldMatch[1], 'fieldId'); const fields = []; const values = [workspaceId, fieldId];
+          if (input.label !== undefined) { values.push(requiredString(input.label, 'label', { max: 160 })); fields.push(`label=$${values.length}`); } if (input.required !== undefined) { if (typeof input.required !== 'boolean') throw new ValidationError('required must be a boolean.'); values.push(input.required); fields.push(`required=$${values.length}`); } if (input.config !== undefined) { values.push(JSON.stringify(input.config)); fields.push(`config=$${values.length}::jsonb`); }
+          if (!fields.length) throw new HttpError(400, 'NO_FIELDS', 'Provide field settings.'); const result = await db.query(`UPDATE custom_field_definitions SET ${fields.join(', ')} WHERE workspace_id=$1 AND id=$2 RETURNING *`, values); if (!result.rows[0]) throw new HttpError(404, 'FIELD_NOT_FOUND', 'Custom field was not found.'); sendJson(response, 200, result.rows[0]); return;
+        }
+        if (suffix === 'tags' && request.method === 'GET') { requirePermission(context, 'crm:read'); const result = await db.query('SELECT id,name FROM tags WHERE workspace_id=$1 ORDER BY name', [workspaceId]); sendJson(response, 200, { data: result.rows }); return; }
+        if (suffix === 'tags' && request.method === 'POST') { requirePermission(context, 'workspace:manage'); const input = await body(); const result = await db.query('INSERT INTO tags(workspace_id,name) VALUES($1,$2) RETURNING id,name', [workspaceId, requiredString(input.name, 'name', { max: 80 })]); sendJson(response, 201, result.rows[0]); return; }
+        const tagMatch = suffix.match(/^tags\/([^/]+)$/);
+        if (tagMatch && request.method === 'PATCH') { requirePermission(context, 'workspace:manage'); const input = await body(); const result = await db.query('UPDATE tags SET name=$3 WHERE workspace_id=$1 AND id=$2 RETURNING id,name', [workspaceId, uuid(tagMatch[1], 'tagId'), requiredString(input.name, 'name', { max: 80 })]); if (!result.rows[0]) throw new HttpError(404, 'TAG_NOT_FOUND', 'Tag was not found.'); sendJson(response, 200, result.rows[0]); return; }
 
         if (suffix === 'tasks' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
@@ -655,11 +701,13 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           if (input.title !== undefined) { values.push(requiredString(input.title, 'title', { max: 240 })); sets.push(`title = $${values.length}`); }
           if (input.description !== undefined) { values.push(optionalString(input.description, 'description', 5000)); sets.push(`description = $${values.length}`); }
           if (input.dueAt !== undefined) { values.push(input.dueAt ? isoDate(input.dueAt, 'dueAt') : null); sets.push(`due_at = $${values.length}`); }
-          if (input.status !== undefined) { values.push(enumValue(input.status, 'status', TASK_STATUSES)); sets.push(`status = $${values.length}`); if (input.status === 'completed') sets.push('completed_at = now()'); }
+          if (input.status !== undefined) { values.push(enumValue(input.status, 'status', TASK_STATUSES)); sets.push(`status = $${values.length}`); sets.push(input.status === 'completed' ? 'completed_at = now()' : 'completed_at = NULL'); }
           if (input.priority !== undefined) { values.push(Math.trunc(finiteNumber(input.priority, 'priority', { min: 0, max: 10 }))); sets.push(`priority = $${values.length}`); }
           if (!sets.length) throw new HttpError(400, 'NO_FIELDS', 'No supported task fields were provided.');
           const result = await transaction(db, async client => {
-            const updated = await client.query(`UPDATE tasks SET ${sets.join(', ')}, updated_at = now() WHERE workspace_id = $1 AND id = $2 RETURNING *`, values);
+            const agentScope = context.role === 'agent' ? ` AND assigned_to = $${values.length + 1}` : '';
+            if (context.role === 'agent') values.push(current.userId);
+            const updated = await client.query(`UPDATE tasks SET ${sets.join(', ')}, updated_at = now() WHERE workspace_id = $1 AND id = $2${agentScope} RETURNING *`, values);
             if (updated.rows[0]?.status === 'completed' && updated.rows[0].lead_id) {
               await client.query('UPDATE leads SET last_contacted_at = now(), updated_at = now() WHERE workspace_id = $1 AND id = $2', [workspaceId, updated.rows[0].lead_id]);
               await dispatchAutomationEvent(client, { workspaceId, eventType: 'task.completed', leadId: updated.rows[0].lead_id, eventId: `task-completed:${taskId}`, actorUserId: current.userId });
@@ -699,10 +747,12 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         if (suffix === 'meetings' && request.method === 'POST') {
           requirePermission(context, 'crm:write'); const input = await body(); const leadId = input.leadId ? uuid(input.leadId, 'leadId') : null;
           if (leadId) await leadVisible(db, context, leadId);
+          const startsAt = isoDate(input.startsAt, 'startsAt'); const endsAt = input.endsAt ? isoDate(input.endsAt, 'endsAt') : null;
+          if (endsAt && Date.parse(endsAt) < Date.parse(startsAt)) throw new ValidationError('endsAt must be after startsAt.', 'endsAt');
           const result = await db.query(
             `INSERT INTO meetings(workspace_id, lead_id, owner_user_id, starts_at, ends_at, status, meeting_type, external_provider, external_event_id, notes)
              VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-            [workspaceId, leadId, current.userId, isoDate(input.startsAt, 'startsAt'), input.endsAt ? isoDate(input.endsAt, 'endsAt') : null,
+            [workspaceId, leadId, current.userId, startsAt, endsAt,
               requiredString(input.status ?? 'scheduled', 'status', { max: 60 }), optionalString(input.meetingType, 'meetingType', 120),
               optionalString(input.externalProvider, 'externalProvider', 80), optionalString(input.externalEventId, 'externalEventId', 240), optionalString(input.notes, 'notes', 5000)]
           );
@@ -713,10 +763,15 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         const meetingMatch = suffix.match(/^meetings\/([^/]+)$/);
         if (meetingMatch && request.method === 'PATCH') {
           requirePermission(context, 'crm:write'); const meetingId = uuid(meetingMatch[1], 'meetingId'); const input = await body();
+          const existing = await db.query('SELECT starts_at, ends_at FROM meetings WHERE workspace_id=$1 AND id=$2', [workspaceId, meetingId]);
+          if (!existing.rows[0]) throw new HttpError(404, 'MEETING_NOT_FOUND', 'Meeting was not found.');
+          const candidateStart = input.startsAt !== undefined ? isoDate(input.startsAt, 'startsAt') : existing.rows[0].starts_at;
+          const candidateEnd = input.endsAt !== undefined ? (input.endsAt ? isoDate(input.endsAt, 'endsAt') : null) : existing.rows[0].ends_at;
+          if (candidateEnd && Date.parse(candidateEnd) < Date.parse(candidateStart)) throw new ValidationError('endsAt must be after startsAt.', 'endsAt');
           const values = [workspaceId, meetingId]; const sets = [];
           for (const [key, column, max] of [['status','status',60],['meetingType','meeting_type',120],['notes','notes',5000]]) if (input[key] !== undefined) { values.push(optionalString(input[key], key, max)); sets.push(`${column} = $${values.length}`); }
-          if (input.startsAt !== undefined) { values.push(isoDate(input.startsAt, 'startsAt')); sets.push(`starts_at = $${values.length}`); }
-          if (input.endsAt !== undefined) { values.push(input.endsAt ? isoDate(input.endsAt, 'endsAt') : null); sets.push(`ends_at = $${values.length}`); }
+          if (input.startsAt !== undefined) { values.push(candidateStart); sets.push(`starts_at = $${values.length}`); }
+          if (input.endsAt !== undefined) { values.push(candidateEnd); sets.push(`ends_at = $${values.length}`); }
           if (!sets.length) throw new HttpError(400, 'NO_FIELDS', 'No supported meeting fields were provided.');
           const result = await db.query(`UPDATE meetings SET ${sets.join(', ')} WHERE workspace_id = $1 AND id = $2 RETURNING *`, values);
           if (!result.rows[0]) throw new HttpError(404, 'MEETING_NOT_FOUND', 'Meeting was not found.');
@@ -769,6 +824,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         if (suffix === 'messages' && request.method === 'GET') {
           requirePermission(context, 'crm:read'); const values = [workspaceId]; let filter = 'workspace_id = $1';
           if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filter += ` AND lead_id = $${values.length}`; }
+          else if (context.role === 'agent') { values.push(current.userId); filter += ` AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=messages.workspace_id AND a.lead_id=messages.lead_id AND a.user_id=$${values.length} AND a.unassigned_at IS NULL)`; }
           values.push(pageSize(url)); const result = await db.query(`SELECT * FROM messages WHERE ${filter} ORDER BY created_at DESC LIMIT $${values.length}`, values);
           sendJson(response, 200, { data: result.rows }); return;
         }
@@ -788,6 +844,8 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         if (suffix === 'messages/send' && request.method === 'POST') {
           requirePermission(context, 'communications:send'); const input = await body(); const key = parseIdempotency(request);
           const leadId = uuid(input.leadId, 'leadId'); await leadVisible(db, context, leadId);
+          const lead = await db.query('SELECT do_not_contact FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceId, leadId]);
+          if (lead.rows[0]?.do_not_contact) throw new HttpError(403, 'DO_NOT_CONTACT', 'This lead is suppressed from communications.');
           const channel = enumValue(input.channel, 'channel', CHANNELS);
           const consent = await db.query('SELECT do_not_contact FROM leads WHERE workspace_id = $1 AND id = $2', [workspaceId, leadId]);
           if (consent.rows[0]?.do_not_contact) throw new HttpError(403, 'DO_NOT_CONTACT', 'This lead is suppressed from communications.');
@@ -843,6 +901,11 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
               [workspaceId, queued.rows[0].id, requiredString(initiated.providerCallId, 'providerCallId', { max: 240 }),
                 enumValue(initiated.status ?? 'queued', 'status', CALL_STATUSES), JSON.stringify({ estimatedCost: estimate })]
             );
+            await db.query(
+              `INSERT INTO usage_events(workspace_id, provider, service, usage_type, quantity, unit, provider_cost, internal_charge, currency, external_reference, idempotency_key, metadata)
+               VALUES($1,$2,'voice','outbound_call',1,'call',$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT(workspace_id,idempotency_key) DO NOTHING`,
+              [workspaceId, providerName, initiated.providerCost ?? estimate.providerCost, estimate.customerCharge, initiated.currency ?? estimate.currency, updated.rows[0].provider_call_id, `call:${updated.rows[0].id}:initiation`, JSON.stringify({ rateId: estimate.rateId })]
+            );
             await audit(db, { workspaceId, actorUserId: current.userId, action: 'call.started', entityType: 'call', entityId: updated.rows[0].id, request, metadata: { provider: providerName } });
             sendJson(response, 202, updated.rows[0]); return;
           } catch (error) {
@@ -880,8 +943,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           if (request.method === 'PATCH' && !action) {
             const input = await body(); const definition = normalizeAutomation(input);
             const updated = await transaction(db, async client => {
-              const prior = await client.query('SELECT COALESCE(MAX(version_number),0) AS version FROM automation_versions WHERE workspace_id=$1 AND automation_id=$2 FOR UPDATE', [workspaceId, automationId]);
-              if (!prior.rows[0]) throw new HttpError(404, 'AUTOMATION_NOT_FOUND', 'Automation was not found.');
+              const locked = await client.query('SELECT id FROM automations WHERE workspace_id=$1 AND id=$2 FOR UPDATE', [workspaceId, automationId]);
+              if (!locked.rows[0]) throw new HttpError(404, 'AUTOMATION_NOT_FOUND', 'Automation was not found.');
+              const prior = await client.query('SELECT COALESCE(MAX(version_number),0) AS version FROM automation_versions WHERE workspace_id=$1 AND automation_id=$2', [workspaceId, automationId]);
               const versionNo = Number(prior.rows[0].version) + 1;
               const version = await client.query('INSERT INTO automation_versions(workspace_id, automation_id, version_number, definition, created_by) VALUES($1,$2,$3,$4::jsonb,$5) RETURNING id', [workspaceId, automationId, versionNo, JSON.stringify(definition), current.userId]);
               const result = await client.query('UPDATE automations SET name=$3, description=$4, trigger_type=$5, trigger_config=$6::jsonb, current_version_id=$7, active=$8, updated_at=now() WHERE workspace_id=$1 AND id=$2 RETURNING *', [workspaceId, automationId, definition.name, definition.description, definition.triggerType, JSON.stringify(definition.triggerConfig), version.rows[0].id, booleanInput(input.active, 'active')]);
@@ -901,7 +965,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           }
           if (request.method === 'POST' && !action) {
             const input = await body(); const key = parseIdempotency(request);
-            const leadId = input.leadId ? uuid(input.leadId, 'leadId') : null; if (leadId) await leadVisible(db, context, leadId);
+            const leadId = uuid(input.leadId, 'leadId'); await leadVisible(db, context, leadId);
             const result = await queueAutomationRun(db, { workspaceId, automationId, leadId, idempotencyKey: key, actorUserId: current.userId, test: false });
             sendJson(response, 202, result); return;
           }
@@ -909,7 +973,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         if (suffix === 'usage/estimate' && request.method === 'POST') {
           requirePermission(context, 'usage:read'); const input = await body();
-          const estimate = await quoteUsage(db, { workspaceId, provider: input.provider ?? null, service: requiredString(input.service, 'service', { max: 80 }), usageType: requiredString(input.usageType, 'usageType', { max: 80 }), quantity: finiteNumber(input.quantity, 'quantity', { min: 0 }), unit: requiredString(input.unit, 'unit', { max: 60 }), currency: requiredString(input.currency ?? 'INR', 'currency', { max: 3 }).toUpperCase() });
+          const estimate = await quoteUsage(db, { workspaceId, provider: input.provider ?? null, service: requiredString(input.service, 'service', { max: 80 }), usageType: requiredString(input.usageType, 'usageType', { max: 80 }), quantity: decimal(input.quantity, 'quantity', { min: '0' }), unit: requiredString(input.unit, 'unit', { max: 60 }), currency: requiredString(input.currency ?? 'INR', 'currency', { max: 3 }).toUpperCase() });
           sendJson(response, 200, estimate); return;
         }
         if (suffix === 'usage' && request.method === 'GET') {
@@ -929,7 +993,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             `INSERT INTO provider_rates(workspace_id, provider, service, usage_type, unit, provider_cost_per_unit, customer_charge_per_unit, currency, valid_from, valid_until)
              VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id, provider, service, usage_type, unit, provider_cost_per_unit, customer_charge_per_unit, currency, valid_from, valid_until`,
             [workspaceId, optionalString(input.provider, 'provider', 120), requiredString(input.service, 'service', { max: 80 }), requiredString(input.usageType, 'usageType', { max: 80 }),
-              requiredString(input.unit, 'unit', { max: 60 }), String(finiteNumber(input.providerCostPerUnit, 'providerCostPerUnit', { min: 0 })), String(finiteNumber(input.customerChargePerUnit, 'customerChargePerUnit', { min: 0 })),
+              requiredString(input.unit, 'unit', { max: 60 }), decimal(input.providerCostPerUnit, 'providerCostPerUnit', { min: '0' }), decimal(input.customerChargePerUnit, 'customerChargePerUnit', { min: '0' }),
               requiredString(input.currency, 'currency', { min: 3, max: 3 }).toUpperCase(), input.validFrom ? isoDate(input.validFrom, 'validFrom') : new Date(), input.validUntil ? isoDate(input.validUntil, 'validUntil') : null]
           );
           await audit(db, { workspaceId, actorUserId: current.userId, action: 'usage.rate_created', entityType: 'provider_rate', entityId: result.rows[0].id, request });
@@ -1018,24 +1082,27 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           const workspaceId = uuid(event.workspaceId, 'workspaceId');
           const channel = enumValue(messageEvent.channel, 'channel', CHANNELS);
           const providerMessageId = requiredString(messageEvent.providerMessageId, 'providerMessageId', { max: 240 });
+          const providerEventAt = event.occurredAt ? isoDate(event.occurredAt, 'occurredAt') : new Date().toISOString();
           const providerConfig = await db.query('SELECT id FROM communication_providers WHERE workspace_id=$1 AND provider_name=$2 AND channel=$3 AND active=true', [workspaceId, provider, channel]);
           if (!providerConfig.rows[0]) throw new HttpError(404, 'PROVIDER_NOT_CONFIGURED', 'The message provider is not configured in this workspace.');
           const stored = await transaction(db, async client => {
             const receipt = await client.query('INSERT INTO webhook_receipts(provider,event_id) VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING id', [provider, eventId]);
             if (!receipt.rows[0]) return { duplicate: true };
             const inserted = await client.query(
-              `INSERT INTO messages(workspace_id, lead_id, provider_id, channel, direction, provider_message_id, status, subject, body, sent_at, delivered_at, idempotency_key, metadata)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb)
+              `INSERT INTO messages(workspace_id, lead_id, provider_id, channel, direction, provider_message_id, status, subject, body, sent_at, delivered_at, provider_event_at, idempotency_key, metadata)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb)
                ON CONFLICT(provider_id,provider_message_id) DO UPDATE SET status=EXCLUDED.status, delivered_at=COALESCE(EXCLUDED.delivered_at,messages.delivered_at), metadata=messages.metadata || EXCLUDED.metadata
+               WHERE COALESCE(EXCLUDED.provider_event_at,'epoch'::timestamptz) >= COALESCE(messages.provider_event_at,'epoch'::timestamptz)
                RETURNING id, workspace_id, lead_id, channel, direction, provider_message_id, status, sent_at, delivered_at`,
               [workspaceId, messageEvent.leadId ? uuid(messageEvent.leadId, 'leadId') : null, providerConfig.rows[0].id, channel,
                 enumValue(messageEvent.direction, 'direction', ['inbound','outbound']), providerMessageId,
                 requiredString(messageEvent.status, 'status', { max: 80 }), optionalString(messageEvent.subject, 'subject', 500), optionalString(messageEvent.body, 'body', 10000),
-                messageEvent.sentAt ? isoDate(messageEvent.sentAt, 'sentAt') : null, messageEvent.deliveredAt ? isoDate(messageEvent.deliveredAt, 'deliveredAt') : null,
+                messageEvent.sentAt ? isoDate(messageEvent.sentAt, 'sentAt') : null, messageEvent.deliveredAt ? isoDate(messageEvent.deliveredAt, 'deliveredAt') : null, providerEventAt,
                 `provider:${provider}:${providerMessageId}`, JSON.stringify({ eventId })]
             );
-            await audit(client, { workspaceId, actorUserId: null, action: 'message.webhook_received', entityType: 'message', entityId: inserted.rows[0].id, request, metadata: { provider, eventId, channel } });
-            return { message: inserted.rows[0], duplicate: false };
+            const message = inserted.rows[0] ?? (await client.query('SELECT id, workspace_id, lead_id, channel, direction, provider_message_id, status, sent_at, delivered_at FROM messages WHERE provider_id=$1 AND provider_message_id=$2', [providerConfig.rows[0].id, providerMessageId])).rows[0];
+            await audit(client, { workspaceId, actorUserId: null, action: 'message.webhook_received', entityType: 'message', entityId: message.id, request, metadata: { provider, eventId, channel } });
+            return { message, duplicate: false };
           });
           sendJson(response, 202, stored.duplicate ? { received: true, duplicate: true } : { received: true, message: stored.message }); return;
         }
