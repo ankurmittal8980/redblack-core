@@ -11,7 +11,7 @@
     "migrate": "node backend/src/migrate.js",
     "import:sheet": "node backend/src/import-cli.js",
     "test": "node --test",
-    "check": "node --check backend/src/server.js && node --check backend/src/worker.js && node --test"
+    "check": "node --check backend/src/server.js && node --check backend/src/worker.js && node --check frontend/public/app.js && node --test"
   },
   "dependencies": {
     "pg": "^8.16.3"
