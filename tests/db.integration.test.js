@@ -25,6 +25,14 @@ test('PostgreSQL migrations apply idempotently and install tenant/security contr
                                          to_regclass('provider_rates') IS NOT NULL AS rates,
                                          to_regclass('import_batches') IS NOT NULL AS imports`);
     assert.deepEqual(tables.rows[0], { sessions: true, action_runs: true, rates: true, imports: true });
+
+    // Simulate a pre-PR13 install where 0004 was recorded but its index was absent.
+    // The forward repair migration must restore the index without resetting data.
+    await db.query('DROP INDEX IF EXISTS automations_workspace_name_key');
+    await db.query("DELETE FROM schema_migrations WHERE version='0005_repair_automation_workspace_name_constraint.sql'");
+    await applyMigrations(db);
+    const repairedIndex = await db.query("SELECT 1 FROM pg_indexes WHERE indexname='automations_workspace_name_key'");
+    assert.equal(repairedIndex.rowCount, 1);
   } finally {
     await db.end();
   }
