@@ -131,7 +131,7 @@ async function installDefaultAutomations(db, workspaceId, createdBy) {
     const automation = await db.query('INSERT INTO automations(workspace_id,name,description,active,trigger_type,trigger_config,created_by) VALUES($1,$2,$3,false,$4,$5::jsonb,$6) ON CONFLICT (workspace_id,name) DO NOTHING RETURNING id', [workspaceId, definition.name, 'RedBlack Core default CRM behavior.', definition.triggerType, JSON.stringify(definition.triggerConfig), createdBy]);
     if (!automation.rows[0]) continue;
     const version = await db.query('INSERT INTO automation_versions(workspace_id,automation_id,version_number,definition,created_by) VALUES($1,$2,1,$3::jsonb,$4) RETURNING id', [workspaceId, automation.rows[0].id, JSON.stringify(definition), createdBy]);
-    await db.query('UPDATE automations SET current_version_id=$3 WHERE workspace_id=$1 AND id=$2', [workspaceId, automation.rows[0].id, version.rows[0].id]);
+    await db.query('UPDATE automations SET current_version_id=$3, active=true WHERE workspace_id=$1 AND id=$2', [workspaceId, automation.rows[0].id, version.rows[0].id]);
   }
 }
 
