@@ -16,7 +16,7 @@ All workspace routes start with `/workspaces/{workspaceId}`. The active membersh
 | --- | --- |
 | CRM | `leads`, `leads/{leadId}/timeline`, `leads/{leadId}/stage`, `pipelines`, `tasks`, `activities`, `meetings` |
 | Communications | `communications/providers`, `messages`, `messages/send`, `communications/consent`, `calls`, `calls/start` |
-| Automation | `automations`, `automations/{automationId}`, `automations/{automationId}/runs` |
+| Automation | `automations`, `automations/{automationId}`, `automations/{automationId}/runs`, `automations/install-defaults` |
 | PAYG and reporting | `usage`, `usage/estimate`, `usage/rates`, `billing/invoices`, `reports/dashboard`, `reports/sales`, `reports/agents`, `reports/sources`, `audit` |
 
 Provider webhooks are `POST /webhooks/{provider}/calls` and `POST /webhooks/{provider}/messages`. They require a timestamped HMAC signature and are replay-safe.

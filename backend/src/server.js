@@ -24,7 +24,7 @@ const CHANNELS = ['email', 'whatsapp', 'rcs', 'voice'];
 const CALL_DIRECTIONS = ['inbound', 'outbound'];
 const CALL_STATUSES = ['queued', 'ringing', 'answered', 'missed', 'busy', 'failed', 'cancelled'];
 const ACTIVITY_TYPES = ['call', 'email', 'whatsapp', 'rcs', 'meeting', 'note', 'status_change', 'system'];
-const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft'];
+const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft', 'wait'];
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'], ['.css', 'text/css; charset=utf-8'], ['.js', 'text/javascript; charset=utf-8'],
   ['.svg', 'image/svg+xml'], ['.png', 'image/png'], ['.ico', 'image/x-icon']
@@ -113,6 +113,24 @@ async function workspaceSeeds(db, workspaceId) {
         [pipeline.rows[0].id, stageName, stageSlug, stages.findIndex(item => item[1] === stageSlug), won, lost]
       );
     }
+  }
+  await installDefaultAutomations(db, workspaceId, null);
+}
+
+async function installDefaultAutomations(db, workspaceId, createdBy) {
+  const defaults = [
+    { name: 'New lead first follow-up', triggerType: 'lead.created', triggerConfig: {}, actions: [{ type: 'create_task', config: { title: 'First follow-up call', description: 'Call the new lead and record the outcome.', dueInMinutes: 60, assignTo: 'owner' } }] },
+    { name: 'Stage change follow-up', triggerType: 'lead.stage_changed', triggerConfig: {}, actions: [{ type: 'create_task', config: { title: 'Follow up after stage change', dueInMinutes: 1440, assignTo: 'owner' } }] },
+    { name: 'Completed task next action', triggerType: 'task.completed', triggerConfig: {}, actions: [{ type: 'create_task', config: { title: 'Plan the next follow-up', dueInMinutes: 1440, assignTo: 'owner' } }] },
+    { name: 'Meeting created follow-up', triggerType: 'meeting.created', triggerConfig: {}, actions: [{ type: 'create_task', config: { title: 'Prepare meeting follow-up', dueInMinutes: 1440, assignTo: 'owner' } }] },
+    { name: 'No response follow-up', triggerType: 'lead.no_response', triggerConfig: { afterMinutes: 1440 }, actions: [{ type: 'create_task', config: { title: 'Try the lead again after no response', dueInMinutes: 0, assignTo: 'owner' } }] }
+  ];
+  for (const definition of defaults) {
+    const existing = await db.query('SELECT id FROM automations WHERE workspace_id=$1 AND name=$2 LIMIT 1', [workspaceId, definition.name]);
+    if (existing.rows[0]) continue;
+    const automation = await db.query('INSERT INTO automations(workspace_id,name,description,active,trigger_type,trigger_config,created_by) VALUES($1,$2,$3,true,$4,$5::jsonb,$6) RETURNING id', [workspaceId, definition.name, 'RedBlack Core default CRM behavior.', definition.triggerType, JSON.stringify(definition.triggerConfig), createdBy]);
+    const version = await db.query('INSERT INTO automation_versions(workspace_id,automation_id,version_number,definition,created_by) VALUES($1,$2,1,$3::jsonb,$4) RETURNING id', [workspaceId, automation.rows[0].id, JSON.stringify(definition), createdBy]);
+    await db.query('UPDATE automations SET current_version_id=$3 WHERE workspace_id=$1 AND id=$2', [workspaceId, automation.rows[0].id, version.rows[0].id]);
   }
 }
 
@@ -775,6 +793,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           if (!sets.length) throw new HttpError(400, 'NO_FIELDS', 'No supported meeting fields were provided.');
           const result = await db.query(`UPDATE meetings SET ${sets.join(', ')} WHERE workspace_id = $1 AND id = $2 RETURNING *`, values);
           if (!result.rows[0]) throw new HttpError(404, 'MEETING_NOT_FOUND', 'Meeting was not found.');
+          if (result.rows[0].status === 'missed' && result.rows[0].lead_id) await dispatchAutomationEvent(db, { workspaceId, eventType: 'meeting.missed', leadId: result.rows[0].lead_id, eventId: `meeting-missed:${meetingId}`, actorUserId: current.userId, eventData: { status: 'missed' } });
           sendJson(response, 200, result.rows[0]); return;
         }
 
@@ -914,6 +933,11 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           }
         }
 
+        if (suffix === 'automations/install-defaults' && request.method === 'POST') {
+          requirePermission(context, 'automation:manage');
+          await installDefaultAutomations(db, workspaceId, current.userId);
+          sendJson(response, 200, { installed: true }); return;
+        }
         if (suffix === 'automations' && request.method === 'GET') {
           requirePermission(context, 'automation:manage'); const result = await db.query('SELECT id, name, description, active, trigger_type, trigger_config, current_version_id, created_at, updated_at FROM automations WHERE workspace_id = $1 ORDER BY created_at DESC', [workspaceId]);
           sendJson(response, 200, { data: result.rows }); return;
@@ -1166,21 +1190,22 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
   return server;
 }
 
-function normalizeAutomation(input) {
+export function normalizeAutomation(input) {
   const actions = input.actions;
   if (!Array.isArray(actions) || actions.length < 1 || actions.length > 25) throw new ValidationError('actions must contain between 1 and 25 items.', 'actions');
   return {
     name: requiredString(input.name, 'name', { max: 160 }),
     description: optionalString(input.description, 'description', 5000),
-    triggerType: enumValue(input.triggerType, 'triggerType', ['manual', 'lead.created', 'lead.stage_changed', 'task.completed', 'meeting.created', 'call.ended']),
+    triggerType: enumValue(input.triggerType, 'triggerType', ['manual', 'lead.created', 'lead.stage_changed', 'task.completed', 'meeting.created', 'meeting.missed', 'call.ended', 'lead.no_response']),
     triggerConfig: objectBody(input.triggerConfig ?? {}),
     actions: actions.map((action, position) => {
       objectBody(action);
       const type = enumValue(action.type, `actions[${position}].type`, AUTOMATION_ACTIONS);
       const config = objectBody(action.config ?? {});
-      if (type === 'create_task') return { type, config: { title: requiredString(config.title, 'title', { max: 240 }), description: optionalString(config.description, 'description', 5000), dueInMinutes: Math.trunc(finiteNumber(config.dueInMinutes ?? 0, 'dueInMinutes', { min: 0, max: 525600 })) } };
+      if (type === 'create_task') return { type, config: { title: requiredString(config.title, 'title', { max: 240 }), description: optionalString(config.description, 'description', 5000), dueInMinutes: Math.trunc(finiteNumber(config.dueInMinutes ?? 0, 'dueInMinutes', { min: 0, max: 525600 })), assignTo: config.assignTo ? enumValue(config.assignTo, 'assignTo', ['owner', 'current']) : 'owner' } };
       if (type === 'create_activity') return { type, config: { title: requiredString(config.title, 'title', { max: 240 }), body: optionalString(config.body, 'body', 5000) } };
       if (type === 'change_stage') return { type, config: { pipelineId: uuid(config.pipelineId, 'pipelineId'), stageId: uuid(config.stageId, 'stageId') } };
+      if (type === 'wait') return { type, config: { minutes: Math.trunc(finiteNumber(config.minutes, 'minutes', { min: 1, max: 525600 })) } };
       return { type, config: { channel: enumValue(config.channel, 'channel', CHANNELS), subject: optionalString(config.subject, 'subject', 500), body: requiredString(config.body, 'body', { max: 10000 }) } };
     })
   };
