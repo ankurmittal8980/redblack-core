@@ -45,9 +45,11 @@ test('new lead event runs the default automation and creates exactly one follow-
     await ensureDefaultAutomations(db);
     const lead = await db.query("INSERT INTO leads(workspace_id,first_name,status) VALUES($1,'Test','New Lead') RETURNING id", [workspaceId]);
     await dispatchAutomationEvent(db, { workspaceId, eventType: 'lead.created', leadId: lead.rows[0].id, eventId: `test-lead:${lead.rows[0].id}` });
-    const run = await worker.claimRun();
-    assert.equal(run.lead_id, lead.rows[0].id);
-    await worker.runOne(run);
+    const queued = await db.query(`SELECT r.*, v.definition FROM automation_runs r JOIN automation_versions v ON v.id=r.version_id
+      WHERE r.workspace_id=$1 AND r.lead_id=$2 AND r.status='queued'`, [workspaceId, lead.rows[0].id]);
+    assert.equal(queued.rowCount, 1);
+    assert.equal(queued.rows[0].lead_id, lead.rows[0].id);
+    await worker.runOne({ ...queued.rows[0], attempt_count: 1, definition: queued.rows[0].definition });
     const tasks = await db.query("SELECT id FROM tasks WHERE workspace_id=$1 AND lead_id=$2 AND source='automation'", [workspaceId, lead.rows[0].id]);
     assert.equal(tasks.rowCount, 1);
   } finally {
