@@ -40,12 +40,14 @@ These are application modules, not separate databases.
 - leads(workspace_id, status)
 - leads(workspace_id, created_at)
 - lead_pipeline_entries(workspace_id, pipeline_id, stage_id)
-- tasks(workspace_id, assigned_user_id, status, due_at)
+- tasks(workspace_id, assigned_to, status, due_at)
 - activities(workspace_id, lead_id, occurred_at)
 - calls(workspace_id, lead_id, started_at)
 - messages(workspace_id, lead_id, created_at)
 - usage_events(workspace_id, occurred_at)
 - unique idempotency keys for provider/webhook/usage events as appropriate.
+
+Workspace is the v1 billing boundary, so usage is indexed by `(workspace_id, occurred_at)`. If a separate billing tenant is introduced, the ledger will add `tenant_id` and index `(tenant_id, occurred_at)` alongside the workspace indexes.
 
 ## Security
 - Database private to the application network.
@@ -59,10 +61,12 @@ These are application modules, not separate databases.
 Automated production backups and a documented restore procedure are required before launch. Restore testing is part of pre-launch QA.
 
 ## Migration
-The approved CRM migration map is the source specification. A dedicated migration script will validate rows, normalize phone/email, map pipeline/status values, preserve source IDs, detect duplicates without silent deletion, import supported leads/tasks/activities, produce import and rejected-row reports, and be safely re-runnable using deterministic migration keys.
+The approved CRM migration map is the source specification. A dedicated migration script will validate rows, normalize phone/email, map pipeline/status values, preserve source IDs, detect duplicates without silent deletion, and be safely re-runnable using deterministic migration keys.
+
+Supported source records explicitly include leads, tasks, activities, and meetings. Meeting imports preserve the legacy meeting date, status, calendar event ID, and external-provider reference when present. Each imported meeting is linked to its lead through a stable source key, and unmatched or invalid calendar rows appear in the rejected-row report rather than being silently dropped.
 
 ## PAYG
-Provider usage is recorded in PostgreSQL while external communication providers remain adapters. Each provider call/message/AI usage event records quantity and provider cost when available so RedBlack can calculate internal cost and customer charge before execution or quoting.
+Provider usage is recorded in PostgreSQL while external communication providers remain adapters. A Core-managed, versioned provider-rate and customer-charge table supplies the estimate before a provider-backed send, call, or quote. The resulting usage event stores actual provider cost separately for reconciliation, along with the rate version used. The ledger stays append-only; corrections are compensating records.
 
 ## One-domain deployment
 The public website remains on the existing RedBlack Tech domain. The CRM application is planned under `/app` and API routes under `/api/v1`, subject to final reverse-proxy configuration.
@@ -81,3 +85,4 @@ The public website remains on the existing RedBlack Tech domain. The CRM applica
 - Convo360 integration.
 
 These remain implementation decisions and must not change the approved core data model.
+
