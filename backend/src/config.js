@@ -12,6 +12,7 @@ export const config = Object.freeze({
   databaseSsl: process.env.DATABASE_SSL === 'true',
   sessionTtlHours: integer(process.env.SESSION_TTL_HOURS, 12),
   bootstrapToken: process.env.BOOTSTRAP_TOKEN ?? '',
+  trustProxy: process.env.TRUST_PROXY === 'true',
   bodyLimitBytes: 1024 * 1024,
   isProduction: (process.env.APP_ENV ?? 'development') === 'production'
 });
