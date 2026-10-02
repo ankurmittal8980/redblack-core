@@ -1,0 +1,43 @@
+name: Core checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: redblack_test
+          POSTGRES_USER: redblack
+          POSTGRES_PASSWORD: redblack_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U redblack -d redblack_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgres://redblack:redblack_test@localhost:5432/redblack_test
+      TEST_DATABASE_URL: postgres://redblack:redblack_test@localhost:5432/redblack_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check
+      - run: pnpm audit --prod --audit-level high
+      - run: docker build -t redblack-core:ci .
+
+
