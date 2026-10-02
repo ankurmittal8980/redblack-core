@@ -136,6 +136,15 @@ async function installDefaultAutomations(db, workspaceId, createdBy) {
 }
 
 export async function ensureDefaultAutomations(db = pool) {
+  const uniquenessIndex = await db.query(`
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = current_schema()
+      AND indexname = 'automations_workspace_name_key'
+  `);
+  if (!uniquenessIndex.rows[0]) {
+    throw new Error('Required automation uniqueness index is missing. Run database migrations before starting Core.');
+  }
   const workspaces = await db.query("SELECT id FROM workspaces WHERE status='active'");
   for (const workspace of workspaces.rows) await installDefaultAutomations(db, workspace.id, null);
 }
