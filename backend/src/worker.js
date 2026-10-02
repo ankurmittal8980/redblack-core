@@ -4,12 +4,12 @@ import { pool, transaction, closeDatabase } from './db.js';
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
-async function claimRun() {
+export async function claimRun() {
   return transaction(pool, async client => {
     const selected = await client.query(
       `SELECT id, workspace_id, automation_id, version_id, lead_id, attempt_count, metadata
          FROM automation_runs
-        WHERE (status='queued' AND COALESCE(retry_after, created_at) <= now())
+        WHERE (status='queued' AND COALESCE(resume_at, retry_after, created_at) <= now())
            OR (status='running' AND started_at < now() - interval '10 minutes')
         ORDER BY COALESCE(retry_after, created_at), id
         LIMIT 1 FOR UPDATE SKIP LOCKED`
@@ -65,13 +65,19 @@ async function executeAction(run, action, position) {
     if (prior.rows[0]?.status === 'completed') return;
     await client.query("UPDATE automation_action_runs SET status='pending', result='{}'::jsonb WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3", [run.workspace_id, run.id, position]);
     let result = {};
-    if (action.type === 'create_task') {
+    if (action.type === 'wait') {
+      await client.query("UPDATE automation_runs SET status='queued', resume_at=now()+($2::text || ' minutes')::interval WHERE id=$1", [run.id, String(config.minutes ?? 0)]);
+      result = { resumedAt: `in ${config.minutes ?? 0} minutes` };
+    } else if (action.type === 'create_task') {
+      const owner = config.assignTo === 'owner' ? await client.query("SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND role='owner' AND active=true ORDER BY joined_at LIMIT 1", [run.workspace_id]) : null;
+      const assignedTo = owner?.rows[0]?.user_id ?? run.metadata?.requestedBy ?? null;
       const task = await client.query(
-        `INSERT INTO tasks(workspace_id, lead_id, created_by, title, description, due_at, status, priority, source, task_type)
-         VALUES($1,$2,$3,$4,$5,now()+($6::text || ' minutes')::interval,'pending',0,'automation','follow_up') RETURNING id`,
-        [run.workspace_id, run.lead_id, run.metadata?.requestedBy ?? null, config.title, config.description ?? null, String(config.dueInMinutes ?? 0)]
+        `INSERT INTO tasks(workspace_id, lead_id, assigned_to, created_by, title, description, due_at, status, priority, source, task_type)
+         SELECT $1,$2,$3,$4,$5,$6,now()+($7::text || ' minutes')::interval,'pending',0,'automation','follow_up'
+         WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE workspace_id=$1 AND lead_id=$2 AND source='automation' AND title=$5 AND status IN ('pending','in_progress')) RETURNING id`,
+        [run.workspace_id, run.lead_id, assignedTo, run.metadata?.requestedBy ?? null, config.title, config.description ?? null, String(config.dueInMinutes ?? 0)]
       );
-      result = { taskId: task.rows[0].id };
+      result = { taskId: task.rows[0]?.id ?? null, duplicate: !task.rows[0] };
     } else if (action.type === 'create_activity') {
       const activity = await client.query(
         `INSERT INTO activities(workspace_id, lead_id, user_id, type, title, body, metadata)
@@ -114,7 +120,7 @@ async function executeAction(run, action, position) {
   });
 }
 
-async function runOne(run) {
+export async function runOne(run) {
   try {
     const actions = run.definition?.actions;
     if (!Array.isArray(actions) || actions.length > 25) throw new Error('Automation version has an invalid action list.');
@@ -129,6 +135,7 @@ async function runOne(run) {
         );
         throw error;
       }
+      if (actions[index].type === 'wait') return;
     }
     await pool.query("UPDATE automation_runs SET status='completed', completed_at=now(), error_message=NULL WHERE id=$1 AND status='running'", [run.id]);
   } catch (error) {
@@ -144,6 +151,18 @@ async function runOne(run) {
   }
 }
 
+async function enqueueNoResponseRuns() {
+  await transaction(pool, async client => {
+    const candidates = await client.query(`SELECT l.workspace_id, l.id AS lead_id, a.id AS automation_id, a.current_version_id
+      FROM leads l JOIN automations a ON a.workspace_id=l.workspace_id AND a.trigger_type='lead.no_response' AND a.active=true
+      WHERE l.deleted_at IS NULL AND l.updated_at < now() - interval '24 hours'`);
+    for (const item of candidates.rows) {
+      await client.query(`INSERT INTO automation_runs(workspace_id,automation_id,version_id,lead_id,status,idempotency_key,metadata)
+        VALUES($1,$2,$3,$4,'queued',$5,'{"requestedBy":null,"scheduled":true}'::jsonb) ON CONFLICT(automation_id,idempotency_key) DO NOTHING`, [item.workspace_id, item.automation_id, item.current_version_id, item.lead_id, `scheduled:no-response:${item.lead_id}:${new Date().toISOString().slice(0,10)}`]);
+    }
+  });
+}
+
 export async function startWorker() {
   let stopping = false;
   process.on('SIGTERM', () => { stopping = true; });
@@ -152,7 +171,7 @@ export async function startWorker() {
     try {
       const run = await claimRun();
       if (run) await runOne(run);
-      else await sleep(1000);
+      else { await enqueueNoResponseRuns(); await sleep(1000); }
     } catch (error) {
       process.stderr.write(JSON.stringify({ level: 'error', worker: 'automation', message: error.message }) + '\n');
       await sleep(2000);
