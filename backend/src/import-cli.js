@@ -346,6 +346,7 @@ function validateLeadHeaders(parsed) {
 }
 
 async function main() {
+  const db = pool;
   const inputDir = process.argv[2];
   if (!inputDir) throw new Error('Usage: pnpm import:sheet -- <csv-folder> [--apply]');
   const apply = process.argv.includes('--apply');
