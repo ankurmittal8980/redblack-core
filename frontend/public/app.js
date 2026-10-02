@@ -121,7 +121,7 @@ async function renderDashboard() {
   const action = ['owner','admin','manager','agent'].includes(appState.role) ? '<button class="button button-primary" data-action="new-lead">+ New lead</button>' : '';
   const leadHtml = (leads.data ?? []).map(lead => `<tr><td><div class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</div><div class="lead-sub">${escapeHtml(lead.company_name || lead.email || lead.phone || '')}</div></td><td>${escapeHtml(lead.brand_project || '—')}</td><td>${badge(lead.temperature ?? lead.status)}</td><td>${fmtDate(lead.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Your lead list is ready when you add your first record.</td></tr>';
   const taskHtml = (tasks.data ?? []).map(task => `<div class="task-row"><input class="task-check" type="checkbox" data-action="complete-task" data-id="${escapeHtml(task.id)}" aria-label="Complete ${escapeHtml(task.title)}"><div><div class="task-title">${escapeHtml(task.title)}</div><div class="task-meta">${escapeHtml(task.task_type || 'Follow-up')}</div></div><div class="task-due">${fmtDate(task.due_at)}</div></div>`).join('') || '<div class="empty-state"><div><strong>No pending tasks</strong>New follow-ups will appear here.</div></div>';
-  setPage(`${pageHeading('YOUR WORKSPACE', 'Good to see you, ${(appState.user.displayName || '').split(' ')[0] || 'there'}', 'Here is what is moving across your team.', action)}
+  setPage(`${pageHeading('YOUR WORKSPACE', `Good to see you, ${(appState.user.displayName || '').split(' ')[0] || 'there'}`, 'Here is what is moving across your team.', action)}
     <section class="metrics">
       ${metric('Total leads', fmtNumber(summary.total_leads), 'Active records', true)}
       ${metric('Hot leads', fmtNumber(summary.hot), 'Ready for a follow-up')}
@@ -405,7 +405,7 @@ $('#viewRoot').addEventListener('submit', async event => {
       showToast(`Automation saved as version 1${result.active ? ' and activated' : ''}.`); await renderAutomations();
     } else if (form.id === 'estimateForm') {
       const estimate = await api(workspacePath('usage/estimate'), { method: 'POST', body: { ...input, quantity: Number(input.quantity) } });
-      $('#estimateResult').innerHTML = `<div class="notice notice-green">Estimated provider cost: <strong>${fmtMoney(estimate.providerCost, estimate.currency)}</strong> · Customer charge: <strong>${fmtMoney(estimate.customerCharge, estimate.currency)}</strong> · Rate ${escapeHtml(estimate.rateId.slice(0,8)}</div>`;
+      $('#estimateResult').innerHTML = `<div class="notice notice-green">Estimated provider cost: <strong>${fmtMoney(estimate.providerCost, estimate.currency)}</strong> · Customer charge: <strong>${fmtMoney(estimate.customerCharge, estimate.currency)}</strong> · Rate ${escapeHtml(estimate.rateId.slice(0, 8))}</div>`;
     } else if (form.id === 'rateForm') {
       const rate = { ...input, provider: input.provider || null, providerCostPerUnit: Number(input.providerCostPerUnit), customerChargePerUnit: Number(input.customerChargePerUnit), validFrom: input.validFrom ? localDateTime(input.validFrom) : null };
       await api(workspacePath('usage/rates'), { method: 'POST', body: rate }); showToast('Rate version published.'); await renderUsage();
