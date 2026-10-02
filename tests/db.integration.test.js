@@ -51,7 +51,7 @@ test('new lead event runs the default automation and creates exactly one follow-
     const tasks = await db.query("SELECT id FROM tasks WHERE workspace_id=$1 AND lead_id=$2 AND source='automation'", [workspaceId, lead.rows[0].id]);
     assert.equal(tasks.rowCount, 1);
   } finally {
-    await db.query('DELETE FROM workspaces WHERE id=$1', [workspaceId]);
+    // The migration intentionally makes automation versions append-only; this test uses an ephemeral CI database.
     await db.end();
   }
 });
