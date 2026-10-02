@@ -39,6 +39,7 @@ export const OPENAPI_SPEC = Object.freeze({
     [`${workspace}/communications/consent`]: { ...protectedGet('Read consent preferences'), ...protectedWrite('Update consent preferences', 'patch') },
     [`${workspace}/calls`]: { ...protectedGet('List calls'), ...protectedWrite('Create a call record') },
     [`${workspace}/automations`]: { ...protectedGet('List automations'), ...protectedWrite('Create a versioned automation') },
+    [`${workspace}/automations/install-defaults`]: { ...protectedWrite('Install default CRM automations') },
     [`${workspace}/automations/{automationId}`]: { ...protectedWrite('Publish a new automation version', 'patch') },
     [`${workspace}/usage`]: protectedGet('List metered usage'),
     [`${workspace}/usage/estimate`]: protectedWrite('Estimate PAYG provider cost'),
