@@ -114,14 +114,15 @@ function renderLeadRows(rows) {
 
 async function renderDashboard() {
   const [report, leads, tasks, pipelines] = await Promise.all([
-    api(`${workspacePath('reports/dashboard')}?from=${encodeURIComponent(new Date(Date.now() - 30 * 86400000).toISOString())}&to=${encodeURIComponent(new Date().toISOString())}`),
+    appState.role === 'agent' ? Promise.resolve({ summary: {} }) : api(`${workspacePath('reports/dashboard')}?from=${encodeURIComponent(new Date(Date.now() - 30 * 86400000).toISOString())}&to=${encodeURIComponent(new Date().toISOString())}`),
     api(`${workspacePath('leads')}?limit=6`), api(`${workspacePath('tasks')}?status=pending&limit=6`), api(workspacePath('pipelines'))
   ]);
   const summary = report.summary ?? {};
   const action = ['owner','admin','manager','agent'].includes(appState.role) ? '<button class="button button-primary" data-action="new-lead">+ New lead</button>' : '';
   const leadHtml = (leads.data ?? []).map(lead => `<tr><td><div class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</div><div class="lead-sub">${escapeHtml(lead.company_name || lead.email || lead.phone || '')}</div></td><td>${escapeHtml(lead.brand_project || '—')}</td><td>${badge(lead.temperature ?? lead.status)}</td><td>${fmtDate(lead.created_at)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Your lead list is ready when you add your first record.</td></tr>';
   const taskHtml = (tasks.data ?? []).map(task => `<div class="task-row"><input class="task-check" type="checkbox" data-action="complete-task" data-id="${escapeHtml(task.id)}" aria-label="Complete ${escapeHtml(task.title)}"><div><div class="task-title">${escapeHtml(task.title)}</div><div class="task-meta">${escapeHtml(task.task_type || 'Follow-up')}</div></div><div class="task-due">${fmtDate(task.due_at)}</div></div>`).join('') || '<div class="empty-state"><div><strong>No pending tasks</strong>New follow-ups will appear here.</div></div>';
-  setPage(`${pageHeading('YOUR WORKSPACE', 'Good to see you, ${(appState.user.displayName || '').split(' ')[0] || 'there'}', 'Here is what is moving across your team.', action)}
+  const firstName = (appState.user.displayName || '').trim().split(/\s+/)[0] || 'there';
+  setPage(`${pageHeading('YOUR WORKSPACE', `Good to see you, ${firstName}`, 'Here is what is moving across your team.', action)}
     <section class="metrics">
       ${metric('Total leads', fmtNumber(summary.total_leads), 'Active records', true)}
       ${metric('Hot leads', fmtNumber(summary.hot), 'Ready for a follow-up')}
@@ -166,8 +167,9 @@ async function renderLeadDetail(leadId) {
 }
 
 async function renderPipelines() {
-  const [pipelines, leads] = await Promise.all([api(workspacePath('pipelines')), api(`${workspacePath('leads')}?limit=100`)]);
+  const pipelines = await api(workspacePath('pipelines'));
   const first = pipelines.data?.[0];
+  const leads = first ? await api(`${workspacePath('leads')}?pipelineId=${encodeURIComponent(first.id)}&limit=100`) : { data: [] };
   const cards = (leads.data ?? []).map(lead => ({ lead, current: null }));
   if (first) {
     const board = first.stages.map(stage => {
@@ -222,9 +224,10 @@ async function renderCalling() {
 }
 
 async function renderAutomations() {
-  const result = await api(`${workspacePath('automations')}`);
+  const [result, leads] = await Promise.all([api(`${workspacePath('automations')}`), api(`${workspacePath('leads')}?limit=100`)]);
   const canManage = ['owner','admin','manager'].includes(appState.role);
-  const rows = (result.data ?? []).map(item => `<tr><td><div class="lead-name">${escapeHtml(item.name)}</div><div class="lead-sub">v${escapeHtml(item.current_version_id?.slice(0,8) || '—')} · ${escapeHtml(item.description || '')}</div></td><td>${badge(item.trigger_type)}</td><td>${badge(item.active ? 'active' : 'inactive')}</td><td><button class="quiet-button" data-action="run-automation" data-id="${escapeHtml(item.id)}">Queue run</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Add a workflow to automate a task, stage change or message draft.</td></tr>';
+  const leadOptions = (leads.data ?? []).map(lead => `<option value="${escapeHtml(lead.id)}">${escapeHtml([lead.first_name, lead.last_name].filter(Boolean).join(' ') || lead.email || lead.phone || lead.id)}</option>`).join('');
+  const rows = (result.data ?? []).map(item => `<tr><td><div class="lead-name">${escapeHtml(item.name)}</div><div class="lead-sub">v${escapeHtml(item.current_version_id?.slice(0,8) || '—')} · ${escapeHtml(item.description || '')}</div></td><td>${badge(item.trigger_type)}</td><td>${badge(item.active ? 'active' : 'inactive')}</td><td><select data-automation-lead><option value="">Choose a lead</option>${leadOptions}</select> <button class="quiet-button" data-action="run-automation" data-id="${escapeHtml(item.id)}">Queue run</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Add a workflow to automate a task, stage change or message draft.</td></tr>';
   setPage(`${pageHeading('WORKFLOW ENGINE', 'Automations', 'Versioned workflows run in the background with retries and an audit trail.', canManage ? '<button class="button button-primary" data-action="toggle-automation-form">+ New automation</button>' : '')}
     <div class="notice">Allowed actions create a task, add an activity, change a pipeline stage or prepare a message draft. External sends stay behind consent checks and a configured provider adapter.</div>
     <section id="automationFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Create automation</h2><button class="text-button" data-action="toggle-automation-form">Close</button></div><form id="automationForm" class="panel-body"><div class="field-grid"><label>Name<input name="name" required maxlength="160"></label><label>Trigger<select name="triggerType"><option>manual</option><option>lead.created</option><option>lead.stage_changed</option><option>task.completed</option><option>meeting.created</option><option>call.ended</option></select></label><label>Description<input name="description" maxlength="500"></label><label>Action<select name="actionType"><option value="create_task">Create a task</option><option value="create_activity">Add an activity</option><option value="create_message_draft">Create a message draft</option></select></label><label class="span-2">Action title / message<textarea name="actionText" required maxlength="10000"></textarea></label></div><label class="checkbox-row"><input name="active" type="checkbox" class="checkbox-input"> Activate after saving</label><button class="button button-primary">Save version 1</button></form></section>
@@ -253,13 +256,14 @@ async function renderReports() {
 }
 
 async function renderWorkspace() {
-  const [workspace, members] = await Promise.all([api(workspacePath()), api(`${workspacePath('members')}`)]);
+  const [workspace, members, pipelines, fields, tags] = await Promise.all([api(workspacePath()), api(`${workspacePath('members')}`), api(workspacePath('pipelines')), api(workspacePath('custom-fields')), api(workspacePath('tags'))]);
   const canManage = ['owner','admin'].includes(appState.role);
+  const builder = canManage ? `<section class="panel"><div class="panel-header"><div><h2 class="panel-title">CRM Builder</h2><p class="panel-subtitle">Configure this workspace without creating a separate CRM codebase.</p></div></div><div class="panel-body"><h3>Pipelines and stages</h3>${(pipelines.data ?? []).map(p => `<div class="config-row"><strong>${escapeHtml(p.name)}</strong> <span class="badge">${p.active ? 'active' : 'archived'}</span><button class="quiet-button" data-action="archive-pipeline" data-id="${escapeHtml(p.id)}">${p.active ? 'Archive' : 'Restore'}</button><div class="stage-list">${(p.stages ?? []).map(s => `<span class="badge">${escapeHtml(s.name)}${s.isWon ? ' · Won' : ''}${s.isLost ? ' · Lost' : ''}</span>`).join(' ')}</div></div>`).join('')}<form id="pipelineForm" class="inline-form"><input name="name" placeholder="New pipeline name" required maxlength="120"><input name="slug" placeholder="pipeline-slug" required maxlength="80"><button class="button button-secondary">Add pipeline</button></form><hr><h3>Custom lead fields</h3><div class="config-list">${(fields.data ?? []).map(f => `<div class="config-row"><strong>${escapeHtml(f.label)}</strong> <span class="badge">${escapeHtml(f.field_type)}</span> <span class="muted">${escapeHtml(f.field_key)}</span></div>`).join('') || '<div class="muted">No custom fields yet.</div>'}</div><form id="fieldForm" class="inline-form"><input name="fieldKey" placeholder="field_key" required maxlength="80"><input name="label" placeholder="Label" required maxlength="160"><select name="fieldType"><option>text</option><option>number</option><option>date</option><option>boolean</option><option>select</option><option>multiselect</option></select><button class="button button-secondary">Add field</button></form><hr><h3>Tags</h3><div class="config-list">${(tags.data ?? []).map(t => `<span class="badge">${escapeHtml(t.name)}</span>`).join(' ') || '<div class="muted">No tags yet.</div>'}</div><form id="tagForm" class="inline-form"><input name="name" placeholder="New tag" required maxlength="80"><button class="button button-secondary">Add tag</button></form></div></section>` : '';
   setPage(`${pageHeading('TEAM SETTINGS', 'Workspace', 'Manage the team boundary, access roles and operating defaults.')}
     <section class="panel"><div class="panel-header"><h2 class="panel-title">Workspace profile</h2><span class="badge">${escapeHtml(appState.role)}</span></div><div class="panel-body"><dl class="key-value"><dt>Name</dt><dd>${escapeHtml(workspace.name)}</dd><dt>Workspace slug</dt><dd>${escapeHtml(workspace.slug)}</dd><dt>Timezone</dt><dd>${escapeHtml(workspace.timezone)}</dd><dt>Currency</dt><dd>${escapeHtml(workspace.currency)}</dd></dl></div></section>
     ${canManage ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Update workspace</h2></div><form id="workspaceForm" class="panel-body"><div class="inline-form"><label>Workspace name<input name="name" value="${escapeHtml(workspace.name)}" required maxlength="120"></label><label>Timezone<input name="timezone" value="${escapeHtml(workspace.timezone)}" required maxlength="80"></label><label>Currency<input name="currency" value="${escapeHtml(workspace.currency)}" minlength="3" maxlength="3" required></label><button class="button button-primary">Save settings</button></div></form></section>` : ''}
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Members</h2><p class="panel-subtitle">${fmtNumber(members.data?.length ?? 0)} active and invited users</p></div></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>${(members.data ?? []).map(member => `<tr><td>${escapeHtml(member.display_name)}</td><td>${escapeHtml(member.email)}</td><td>${badge(member.role)}</td><td>${badge(member.active ? 'active' : 'inactive')}</td></tr>`).join('')}</tbody></table></div></section>
-    ${canManage ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Add a team member</h2></div><form id="memberForm" class="panel-body"><div class="field-grid"><label>Name<input name="displayName" required maxlength="120"></label><label>Email<input name="email" type="email" required maxlength="320"></label><label>Initial password<input name="initialPassword" type="password" required minlength="12" maxlength="1024"></label><label>Role<select name="role"><option>agent</option><option>manager</option><option>reporting</option><option>admin</option><option>service</option></select></label></div><p class="muted small">Share the initial password with the member through your normal secure process. Email delivery is not enabled.</p><button class="button button-primary">Create member</button></form></section>` : ''}`);
+    ${canManage ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Add a team member</h2></div><form id="memberForm" class="panel-body"><div class="field-grid"><label>Name<input name="displayName" required maxlength="120"></label><label>Email<input name="email" type="email" required maxlength="320"></label><label>Initial password<input name="initialPassword" type="password" required minlength="12" maxlength="1024"></label><label>Role<select name="role"><option>agent</option><option>manager</option><option>reporting</option><option>admin</option><option>service</option></select></label></div><p class="muted small">Share the initial password with the member through your normal secure process. Email delivery is not enabled.</p><button class="button button-primary">Create member</button></form></section>` : ''}${builder}`);
 }
 
 async function renderView(view) {
@@ -350,9 +354,12 @@ $('#viewRoot').addEventListener('click', async event => {
     else if (action === 'toggle-task-form') $('#taskFormPanel').classList.toggle('hidden');
     else if (action === 'toggle-automation-form') $('#automationFormPanel').classList.toggle('hidden');
     else if (action === 'reload-view') await renderView(appState.view);
+    else if (action === 'archive-pipeline') { await api(workspacePath(`pipelines/${encodeURIComponent(id)}`), { method: 'PATCH', body: { active: button.textContent.trim() === 'Restore' } }); showToast('Pipeline updated.'); await renderWorkspace(); }
     else if (action === 'run-automation') {
+      const leadId = button.closest('tr')?.querySelector('[data-automation-lead]')?.value;
+      if (!leadId) throw new Error('Choose a lead before queueing this automation.');
       const key = `manual-${crypto.randomUUID()}`;
-      await api(`${workspacePath(`automations/${encodeURIComponent(id)}`)}`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: {} });
+      await api(`${workspacePath(`automations/${encodeURIComponent(id)}`)}`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: { leadId } });
       showToast('Automation run queued.'); await renderAutomations();
     }
   } catch (error) { showToast(error.message, 'error'); }
@@ -405,14 +412,20 @@ $('#viewRoot').addEventListener('submit', async event => {
       showToast(`Automation saved as version 1${result.active ? ' and activated' : ''}.`); await renderAutomations();
     } else if (form.id === 'estimateForm') {
       const estimate = await api(workspacePath('usage/estimate'), { method: 'POST', body: { ...input, quantity: Number(input.quantity) } });
-      $('#estimateResult').innerHTML = `<div class="notice notice-green">Estimated provider cost: <strong>${fmtMoney(estimate.providerCost, estimate.currency)}</strong> · Customer charge: <strong>${fmtMoney(estimate.customerCharge, estimate.currency)}</strong> · Rate ${escapeHtml(estimate.rateId.slice(0,8)}</div>`;
+      $('#estimateResult').innerHTML = `<div class="notice notice-green">Estimated provider cost: <strong>${fmtMoney(estimate.providerCost, estimate.currency)}</strong> · Customer charge: <strong>${fmtMoney(estimate.customerCharge, estimate.currency)}</strong> · Rate ${escapeHtml(estimate.rateId.slice(0,8))}</div>`;
     } else if (form.id === 'rateForm') {
-      const rate = { ...input, provider: input.provider || null, providerCostPerUnit: Number(input.providerCostPerUnit), customerChargePerUnit: Number(input.customerChargePerUnit), validFrom: input.validFrom ? localDateTime(input.validFrom) : null };
+      const rate = { ...input, provider: input.provider || null, validFrom: input.validFrom ? localDateTime(input.validFrom) : null };
       await api(workspacePath('usage/rates'), { method: 'POST', body: rate }); showToast('Rate version published.'); await renderUsage();
     } else if (form.id === 'workspaceForm') {
       await api(workspacePath(), { method: 'PATCH', body: input }); showToast('Workspace updated.'); await renderWorkspace();
     } else if (form.id === 'memberForm') {
       await api(workspacePath('members'), { method: 'POST', body: input }); showToast('Member created.'); await renderWorkspace();
+    } else if (form.id === 'pipelineForm') {
+      await api(workspacePath('pipelines'), { method: 'POST', body: input }); showToast('Pipeline created.'); await renderWorkspace();
+    } else if (form.id === 'fieldForm') {
+      await api(workspacePath('custom-fields'), { method: 'POST', body: input }); showToast('Custom field created.'); await renderWorkspace();
+    } else if (form.id === 'tagForm') {
+      await api(workspacePath('tags'), { method: 'POST', body: input }); showToast('Tag created.'); await renderWorkspace();
     }
   } catch (error) { showToast(error.message, 'error'); }
 });
