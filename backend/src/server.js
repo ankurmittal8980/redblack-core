@@ -459,7 +459,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         if (suffix === 'leads/trash' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
-          const result = await db.query('SELECT l.id, l.first_name, l.last_name, l.company_name, l.email, l.phone, l.status, l.deleted_at, l.updated_at FROM leads l WHERE l.workspace_id=$1 AND l.deleted_at IS NOT NULL AND ($2 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL)) ORDER BY l.deleted_at DESC LIMIT 100', [workspaceId, current.role, current.userId]);
+          const result = await db.query(`SELECT l.id, l.first_name, l.last_name, l.company_name, l.email, l.phone, l.status, l.deleted_at, l.updated_at FROM leads l WHERE l.workspace_id=$1 AND l.deleted_at IS NOT NULL AND ($2 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL)) ORDER BY l.deleted_at DESC LIMIT 100`, [workspaceId, current.role, current.userId]);
           sendJson(response, 200, { data: result.rows }); return;
         }
 
