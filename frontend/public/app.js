@@ -1,5 +1,5 @@
 const $ = selector => document.querySelector(selector);
-const appState = { user: null, workspace: null, workspaces: [], role: null, view: 'dashboard', cursor: null, leadSearch: '', leadStatus: '', selectedLeads: new Set(), toastTimer: null };
+const appState = { user: null, workspace: null, workspaces: [], role: null, view: 'dashboard', cursor: null, leadSearch: '', leadStatus: '', selectedLeads: new Set(), toastTimer: null, csvImportText: null, csvImportFields: [], csvImportErrors: [] };
 const apiRoot = '/api/v1';
 const VIEW_ROLES = Object.freeze({
   automations: ['owner','admin','manager'],
@@ -12,6 +12,18 @@ function viewAllowed(view, role) { return !VIEW_ROLES[view] || VIEW_ROLES[view].
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+}
+
+function downloadCsv(filename, headers, rows) {
+  const cell = value => {
+    let text = value == null ? '' : String(value);
+    if (/^[\s\uFEFF]*[=+\-@]/.test(text)) text = `'${text}`;
+    return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  };
+  const content = `\uFEFF${[headers.map(cell).join(','), ...rows.map(row => row.map(cell).join(','))].join('\r\n')}\r\n`;
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a'); link.href = url; link.download = filename; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function csrfToken() {
@@ -175,14 +187,19 @@ async function renderLeads() {
   if (appState.cursor) params.set('cursor', appState.cursor);
   if (appState.leadSearch) params.set('q', appState.leadSearch);
   if (appState.leadStatus) params.set('status', appState.leadStatus);
+  const exportParams = new URLSearchParams();
+  if (appState.leadSearch) exportParams.set('q', appState.leadSearch);
+  if (appState.leadStatus) exportParams.set('status', appState.leadStatus);
+  const exportQuery = exportParams.toString();
+  const exportHref = `${apiRoot}${workspacePath('leads/export')}${exportQuery ? `?${exportQuery}` : ''}`;
   const memberPromise = ['owner','admin','manager'].includes(appState.role) ? api(workspacePath('members')) : Promise.resolve({data:[]});
   const [result, fieldDefs, tagCatalog, sources, savedViews, pipelines, members, layouts] = await Promise.all([api(`${workspacePath('leads')}?${params}`), api(`${workspacePath('custom-fields')}?entityType=lead`), api(workspacePath('tags')), api(workspacePath('lead-sources')), api(`${workspacePath('saved-views')}?entityType=lead`), api(workspacePath('pipelines')), memberPromise, api(`${workspacePath('layouts')}?entityType=lead`)]);
   const leadColumns = layouts.data?.find(layout => layout.active)?.config?.columns ?? ['project','status','budget','nextAction'];
   const leadColumnLabels = {project:'Project / opportunity',status:'Temperature / status',budget:'Budget',nextAction:'Next action',owner:'Owner',score:'Score',location:'Location'};
   const createAllowed = ['owner','admin','manager','agent'].includes(appState.role);
-  const action = createAllowed ? `<div class="heading-actions"><button class="button button-secondary" data-action="toggle-import-leads">Import CSV</button><a class="button button-secondary" href="${apiRoot}${workspacePath('leads/export')}">Export CSV</a><button class="button button-primary" data-action="toggle-new-lead">+ New lead</button></div>` : `<a class="button button-secondary" href="${apiRoot}${workspacePath('leads/export')}">Export CSV</a>`;
+  const action = createAllowed ? `<div class="heading-actions"><button class="button button-secondary" data-action="toggle-import-leads">Import CSV</button><a class="button button-secondary" href="${escapeHtml(exportHref)}">Export CSV</a><button class="button button-primary" data-action="toggle-new-lead">+ New lead</button></div>` : `<a class="button button-secondary" href="${escapeHtml(exportHref)}">Export CSV</a>`;
   setPage(`${pageHeading('CRM', 'Leads', 'Find, qualify and follow up with every opportunity.', action)}
-    <section id="leadImportPanel" class="panel hidden"><div class="panel-header"><div><h2 class="panel-title">Import leads</h2><p class="panel-subtitle">CSV columns may include First Name, Last Name, Email, Phone, Company, Project, Opportunity Type, Budget, Location and Status. Duplicates are skipped.</p></div><button class="text-button" data-action="toggle-import-leads">Close</button></div><form id="csvImportForm" class="panel-body"><label>CSV file<input name="file" type="file" accept=".csv,text/csv" required></label><button class="button button-primary">Import</button><div id="csvImportResult"></div></form></section>
+    <section id="leadImportPanel" class="panel hidden"><div class="panel-header"><div><h2 class="panel-title">Import leads</h2><p class="panel-subtitle">Preview your file, map its columns and review row errors. Matching email addresses or phone numbers are skipped.</p></div><button class="text-button" data-action="toggle-import-leads">Close</button></div><form id="csvImportForm" class="panel-body"><label>CSV file<input id="csvImportFile" name="file" type="file" accept=".csv,text/csv" required></label><div class="heading-actions"><button class="button button-secondary" type="button" data-action="preview-csv-import">Preview columns</button><button id="csvImportSubmit" class="button button-primary hidden" type="submit">Import leads</button></div><div id="csvImportPreview" class="hidden"></div><div id="csvImportResult"></div></form></section>
     <section id="newLeadPanel" class="panel hidden"><div class="panel-header"><div><h2 class="panel-title">Add a lead</h2><p class="panel-subtitle">Contact details and project context</p></div><button class="text-button" data-action="toggle-new-lead">Close</button></div><form id="newLeadForm" class="panel-body"><div class="field-grid">
       <label>First name<input name="firstName" required maxlength="120"></label><label>Last name<input name="lastName" maxlength="120"></label>
       <label>Email<input name="email" type="email" maxlength="320"></label><label>Phone<input name="phone" type="tel" maxlength="80"></label>
@@ -535,6 +552,21 @@ $('#viewRoot').addEventListener('click', async event => {
     if (action === 'complete-task') { await api(`${workspacePath(`tasks/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: 'completed' } }); showToast('Task completed.'); await renderView(appState.view); return; }
     if (action === 'toggle-new-lead') $('#newLeadPanel').classList.toggle('hidden');
     else if (action === 'toggle-import-leads') $('#leadImportPanel')?.classList.toggle('hidden');
+    else if (action === 'preview-csv-import') {
+      const file = $('#csvImportFile')?.files?.[0]; if (!file) throw new Error('Choose a CSV file.');
+      const csv = await file.text();
+      const preview = await api(workspacePath('leads/import/preview'), { method: 'POST', body: { csv } });
+      appState.csvImportText = csv; appState.csvImportFields = preview.fields ?? []; appState.csvImportErrors = [];
+      const headers = preview.headers ?? [];
+      const mappingControls = appState.csvImportFields.map(field => `<label>${escapeHtml(field.label)}${field.required ? ' *' : ''}<select data-csv-map="${escapeHtml(field.key)}"><option value="">Do not import</option>${headers.map(header => `<option value="${escapeHtml(header)}" ${preview.suggestedMapping?.[field.key] === header ? 'selected' : ''}>${escapeHtml(header)}</option>`).join('')}</select></label>`).join('');
+      const sampleHeaders = headers.slice(0, 10);
+      const sampleRows = (preview.sampleRows ?? []).map(row => `<tr>${sampleHeaders.map((_, index) => `<td>${escapeHtml(row[index])}</td>`).join('')}</tr>`).join('');
+      $('#csvImportPreview').innerHTML = `<p class="panel-subtitle">${fmtNumber(preview.rowCount)} data rows found. Map each CRM field to a file column; fields with * must be mapped.</p><div class="field-grid">${mappingControls}</div><h3 class="panel-title">First ${Math.min(5, preview.sampleRows?.length ?? 0)} rows${headers.length > 10 ? ` · showing 10 of ${headers.length} columns` : ''}</h3><div class="table-wrap"><table><thead><tr>${sampleHeaders.map(header => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead><tbody>${sampleRows || `<tr><td colspan="${Math.max(1, sampleHeaders.length)}" class="empty-state">No data rows found.</td></tr>`}</tbody></table></div>`;
+      $('#csvImportPreview').classList.remove('hidden');
+      const submit = $('#csvImportSubmit'); submit.textContent = `Import ${fmtNumber(preview.rowCount)} rows`; submit.disabled = preview.rowCount === 0; submit.classList.remove('hidden');
+      $('#csvImportResult').replaceChildren();
+    }
+    else if (action === 'download-import-errors') downloadCsv('redblack-import-errors.csv', ['CSV row','Error'], appState.csvImportErrors.map(item => [item.row, item.message]));
     else if (action === 'toggle-lead-edit') $('#leadEditPanel')?.classList.toggle('hidden');
     else if (action === 'new-lead') { renderView('leads'); setTimeout(() => $('#newLeadPanel')?.classList.remove('hidden'), 0); }
     else if (action === 'lead-details') await renderLeadDetail(id);
@@ -582,6 +614,11 @@ $('#viewRoot').addEventListener('click', async event => {
 });
 
 $('#viewRoot').addEventListener('change', async event => {
+  if (event.target.id === 'csvImportFile') {
+    appState.csvImportText = null; appState.csvImportFields = []; appState.csvImportErrors = [];
+    $('#csvImportPreview')?.classList.add('hidden'); $('#csvImportPreview')?.replaceChildren();
+    $('#csvImportResult')?.replaceChildren(); $('#csvImportSubmit')?.classList.add('hidden');
+  }
   if (event.target.id === 'leadStatus') { appState.leadStatus = event.target.value; appState.cursor = null; await renderLeads(); }
   if (event.target.id === 'savedLeadView' && event.target.value) {
     const option=event.target.selectedOptions[0]; let config={}; try{config=JSON.parse(option.dataset.config||'{}');}catch{}
@@ -662,9 +699,19 @@ $('#viewRoot').addEventListener('submit', async event => {
       await api(workspacePath('saved-views'), { method:'POST', body:{ entityType:'lead', name:input.name, config:{ q:appState.leadSearch||'', status:appState.leadStatus||'' } } });
       showToast('Lead view saved.'); await renderLeads();
     } else if (form.id === 'csvImportForm') {
-      const file = form.elements.file.files?.[0]; if (!file) throw new Error('Choose a CSV file.');
-      const result = await api(workspacePath('leads/import'), { method: 'POST', body: { csv: await file.text() } });
-      $('#csvImportResult').innerHTML = `<div class="notice notice-green">Created ${fmtNumber(result.created)} · skipped duplicates ${fmtNumber(result.skipped)} · errors ${fmtNumber(result.errors?.length ?? 0)}</div>`;
+      if (!appState.csvImportText) throw new Error('Preview the selected CSV file before importing.');
+      const mapping = Object.fromEntries([...form.querySelectorAll('[data-csv-map]')].map(select => [select.dataset.csvMap, select.value]).filter(([, header]) => header));
+      if (!['firstName','email','phone'].some(key => mapping[key])) throw new Error('Map First Name, Email or Phone before importing.');
+      const missingRequired = appState.csvImportFields.find(field => field.required && !mapping[field.key]);
+      if (missingRequired) throw new Error(`Map the required custom field “${missingRequired.label.replace(/^Custom: /, '')}” before importing.`);
+      const mappedHeaders = Object.values(mapping);
+      if (new Set(mappedHeaders).size !== mappedHeaders.length) throw new Error('Each CSV column can be mapped to only one CRM field.');
+      const result = await api(workspacePath('leads/import'), { method: 'POST', body: { csv: appState.csvImportText, mapping } });
+      appState.csvImportErrors = result.errors ?? [];
+      const errorRows = appState.csvImportErrors.slice(0, 20).map(item => `<tr><td>${escapeHtml(item.row)}</td><td>${escapeHtml(item.message)}</td></tr>`).join('');
+      const errorDetails = appState.csvImportErrors.length ? `<div class="panel-body"><button class="button button-secondary button-small" type="button" data-action="download-import-errors">Download ${fmtNumber(appState.csvImportErrors.length)} row errors</button><details><summary>Show first ${Math.min(20, appState.csvImportErrors.length)} errors</summary><div class="table-wrap"><table><thead><tr><th>CSV row</th><th>Error</th></tr></thead><tbody>${errorRows}</tbody></table></div></details></div>` : '';
+      $('#csvImportResult').innerHTML = `<div class="notice ${appState.csvImportErrors.length ? 'notice-red' : 'notice-green'}">Processed ${fmtNumber(result.processed)} rows · created ${fmtNumber(result.created)} · skipped duplicates ${fmtNumber(result.skipped)} · errors ${fmtNumber(appState.csvImportErrors.length)}</div>${errorDetails}`;
+      const submit = $('#csvImportSubmit'); submit.disabled = true; submit.textContent = 'Import complete';
       appState.cursor = null;
     } else if (form.id === 'taskForm') {
       const task = { ...input, leadId: input.leadId || null, dueAt: input.dueAt ? localDateTime(input.dueAt) : null, priority: Number(input.priority ?? 0) };

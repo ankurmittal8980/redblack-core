@@ -16,7 +16,7 @@ import { ValidationError, decimal, objectBody, requiredString, optionalString, u
 import { communications, calling } from './providers.js';
 import { AIGateway } from './ai-gateway.js';
 import { OPENAPI_SPEC } from './openapi.js';
-import { parseCsv } from './csv.js';
+import { parseCsv, serializeCsv } from './csv.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const staticRoot = path.resolve(here, '../../frontend/public');
@@ -27,6 +27,25 @@ const CALL_DIRECTIONS = ['inbound', 'outbound'];
 const CALL_STATUSES = ['queued', 'ringing', 'answered', 'missed', 'busy', 'failed', 'cancelled'];
 const ACTIVITY_TYPES = ['call', 'email', 'whatsapp', 'rcs', 'meeting', 'note', 'status_change', 'system'];
 const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft', 'wait', 'update_lead', 'assign_owner', 'create_note', 'invoke_ai', 'schedule_follow_up', 'send_communication', 'start_call'];
+const LEAD_CSV_FIELDS = [
+  { key: 'firstName', label: 'First Name', aliases: ['first', 'firstname', 'given name'] },
+  { key: 'lastName', label: 'Last Name', aliases: ['last', 'lastname', 'surname', 'family name'] },
+  { key: 'email', label: 'Email', aliases: ['email address'] },
+  { key: 'phone', label: 'Phone', aliases: ['phone number', 'mobile', 'mobile number'] },
+  { key: 'companyName', label: 'Company', aliases: ['company name', 'organization', 'organisation'] },
+  { key: 'brandProject', label: 'Project', aliases: ['brand project', 'project name'] },
+  { key: 'opportunityType', label: 'Opportunity Type', aliases: ['opportunity', 'deal type'] },
+  { key: 'budget', label: 'Budget', aliases: ['deal size', 'amount'] },
+  { key: 'location', label: 'Location', aliases: ['city', 'region'] },
+  { key: 'status', label: 'Status', aliases: ['lead status'] },
+  { key: 'temperature', label: 'Temperature', aliases: ['lead temperature'] },
+  { key: 'score', label: 'Score', aliases: ['lead score'] },
+  { key: 'nextAction', label: 'Next Action', aliases: ['next step'] },
+  { key: 'nextActionAt', label: 'Next Follow-up', aliases: ['next follow up', 'follow-up date', 'follow up date'] },
+  { key: 'requirement', label: 'Requirement', aliases: ['requirements'] },
+  { key: 'notes', label: 'Notes', aliases: ['note'] },
+  { key: 'doNotContact', label: 'Do Not Contact', aliases: ['do not call', 'dnc'] }
+];
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'], ['.css', 'text/css; charset=utf-8'], ['.js', 'text/javascript; charset=utf-8'],
   ['.svg', 'image/svg+xml'], ['.png', 'image/png'], ['.ico', 'image/x-icon']
@@ -42,15 +61,32 @@ function sendJson(response, status, value, headers = {}) {
   response.end(body);
 }
 
-function csvCell(value) {
-  const text = value == null ? '' : String(value);
-  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-}
-
 function sendCsv(response, filename, headers, rows) {
-  const body = [headers.map(csvCell).join(','), ...rows.map(row => row.map(csvCell).join(','))].join('\r\n') + '\r\n';
+  const body = serializeCsv(headers, rows);
   response.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${filename}"`, 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store' });
   response.end(body);
+}
+
+function csvHeaderKey(value) {
+  return String(value ?? '').replace(/^\uFEFF/, '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function leadCsvPlan(headers, customFields = []) {
+  const headerByKey = new Map(headers.map(header => [csvHeaderKey(header), header]));
+  const fields = [
+    ...LEAD_CSV_FIELDS.map(field => ({ key: field.key, label: field.label, required: false })),
+    ...customFields.map(field => ({ key: `custom:${field.id}`, label: `Custom: ${field.label}`, required: field.required }))
+  ];
+  const suggestedMapping = {};
+  for (const field of LEAD_CSV_FIELDS) {
+    const match = [field.label, ...field.aliases].map(csvHeaderKey).find(key => headerByKey.has(key));
+    if (match) suggestedMapping[field.key] = headerByKey.get(match);
+  }
+  for (const field of customFields) {
+    const match = [field.label, field.field_key, `Custom: ${field.label}`].map(csvHeaderKey).find(key => headerByKey.has(key));
+    if (match) suggestedMapping[`custom:${field.id}`] = headerByKey.get(match);
+  }
+  return { fields, suggestedMapping };
 }
 
 function secureHeaders(response) {
@@ -551,35 +587,151 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         }
         if (suffix === 'leads/export' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
-          const values = [workspaceId]; let scope = 'l.workspace_id=$1 AND l.deleted_at IS NULL';
-          if (context.role === 'agent') { values.push(current.userId); scope += ` AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$2 AND a.unassigned_at IS NULL)`; }
-          const result = await db.query(`SELECT l.first_name,l.last_name,l.email,l.phone,l.company_name,l.brand_project,l.opportunity_type,l.budget,l.location,l.status,l.temperature,l.score,l.next_action,l.next_action_at,l.created_at FROM leads l WHERE ${scope} ORDER BY l.created_at DESC LIMIT 10000`, values);
-          sendCsv(response, 'redblack-leads.csv', ['First Name','Last Name','Email','Phone','Company','Project','Opportunity Type','Budget','Location','Status','Temperature','Score','Next Action','Next Follow-up','Created'], result.rows.map(row => [row.first_name,row.last_name,row.email,row.phone,row.company_name,row.brand_project,row.opportunity_type,row.budget,row.location,row.status,row.temperature,row.score,row.next_action,row.next_action_at,row.created_at])); return;
+          const values = [workspaceId]; const filters = ['l.workspace_id=$1', 'l.deleted_at IS NULL'];
+          if (url.searchParams.get('status')) {
+            values.push(requiredString(url.searchParams.get('status'), 'status', { max: 80 }));
+            filters.push(`l.status=$${values.length}`);
+          }
+          if (url.searchParams.get('q')) {
+            values.push(`%${requiredString(url.searchParams.get('q'), 'q', { max: 120 }).replace(/[\\%_]/g, '\\$&')}%`);
+            filters.push(`(l.first_name ILIKE $${values.length} ESCAPE '\\' OR l.last_name ILIKE $${values.length} ESCAPE '\\' OR l.email ILIKE $${values.length} ESCAPE '\\' OR l.phone ILIKE $${values.length} ESCAPE '\\' OR l.company_name ILIKE $${values.length} ESCAPE '\\')`);
+          }
+          if (url.searchParams.get('pipelineId')) {
+            values.push(uuid(url.searchParams.get('pipelineId'), 'pipelineId'));
+            filters.push(`EXISTS (SELECT 1 FROM lead_pipeline_entries e WHERE e.workspace_id=l.workspace_id AND e.lead_id=l.id AND e.pipeline_id=$${values.length} AND e.is_current)`);
+          }
+          if (context.role === 'agent') {
+            values.push(current.userId);
+            filters.push(`EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$${values.length} AND a.unassigned_at IS NULL)`);
+          }
+          const result = await db.query(`SELECT l.id,l.first_name,l.last_name,l.email,l.phone,l.company_name,l.brand_project,l.opportunity_type,l.budget,l.location,l.status,l.temperature,l.score,l.next_action,l.next_action_at,l.requirement,l.notes,l.do_not_contact,l.created_at FROM leads l WHERE ${filters.join(' AND ')} ORDER BY l.created_at DESC,l.id DESC LIMIT 10000`, values);
+          const customFields = await db.query("SELECT id,label FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type='lead' ORDER BY created_at,id", [workspaceId]);
+          const customValues = new Map();
+          if (result.rows.length && customFields.rows.length) {
+            const valuesResult = await db.query('SELECT lead_id,field_definition_id,value FROM lead_custom_fields WHERE workspace_id=$1 AND lead_id=ANY($2::uuid[])', [workspaceId, result.rows.map(row => row.id)]);
+            for (const item of valuesResult.rows) {
+              if (!customValues.has(item.lead_id)) customValues.set(item.lead_id, new Map());
+              customValues.get(item.lead_id).set(item.field_definition_id, item.value);
+            }
+          }
+          const headers = ['First Name','Last Name','Email','Phone','Company','Project','Opportunity Type','Budget','Location','Status','Temperature','Score','Next Action','Next Follow-up','Requirement','Notes','Do Not Contact','Created', ...customFields.rows.map(field => `Custom: ${field.label}`)];
+          const rows = result.rows.map(row => [row.first_name,row.last_name,row.email,row.phone,row.company_name,row.brand_project,row.opportunity_type,row.budget,row.location,row.status,row.temperature,row.score,row.next_action,row.next_action_at,row.requirement,row.notes,row.do_not_contact,row.created_at, ...customFields.rows.map(field => customValues.get(row.id)?.get(field.id) ?? '')]);
+          sendCsv(response, 'redblack-leads.csv', headers, rows); return;
+        }
+
+        if (suffix === 'leads/import/preview' && request.method === 'POST') {
+          requirePermission(context, 'crm:write'); const input = await body();
+          const parsed = parseCsv(requiredString(input.csv, 'csv', { max: 900000 }));
+          if (parsed.records.length > 5000) throw new ValidationError('A single import is limited to 5,000 rows.');
+          if (!parsed.headers.length) throw new ValidationError('CSV must include a header row.');
+          const definitions = await db.query("SELECT id,label,field_key,field_type,required FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type='lead' ORDER BY config->>'order',created_at,id", [workspaceId]);
+          const plan = leadCsvPlan(parsed.headers, definitions.rows);
+          sendJson(response, 200, { headers: parsed.headers, rowCount: parsed.records.length, sampleRows: parsed.records.slice(0, 5).map(record => parsed.headers.map(header => record.values[header] ?? '')), fields: plan.fields, suggestedMapping: plan.suggestedMapping }); return;
         }
 
         if (suffix === 'leads/import' && request.method === 'POST') {
           requirePermission(context, 'crm:write'); const input = await body();
           const parsed = parseCsv(requiredString(input.csv, 'csv', { max: 900000 }));
           if (parsed.records.length > 5000) throw new ValidationError('A single import is limited to 5,000 rows.');
-          const key = name => parsed.headers.find(header => header.trim().toLowerCase() === name.toLowerCase());
-          const keys = { first:key('First Name'), last:key('Last Name'), email:key('Email'), phone:key('Phone'), company:key('Company'), project:key('Project'), opportunity:key('Opportunity Type'), budget:key('Budget'), location:key('Location'), status:key('Status') };
-          if (!keys.first && !keys.email && !keys.phone) throw new ValidationError('CSV must contain First Name, Email or Phone columns.');
-          const summary = { created: 0, skipped: 0, errors: [] };
-          for (let index=0; index<parsed.records.length; index += 1) {
-            const row = parsed.records[index].values; const email = normalizeEmail(keys.email ? row[keys.email] : null); const phone = normalizePhone(keys.phone ? row[keys.phone] : null);
-            try {
-              if (email || phone) {
-                const duplicate = await db.query('SELECT id FROM leads WHERE workspace_id=$1 AND deleted_at IS NULL AND (($2::text IS NOT NULL AND email_normalized=$2) OR ($3::text IS NOT NULL AND phone_normalized=$3)) LIMIT 1', [workspaceId,email,phone]);
-                if (duplicate.rows[0]) { summary.skipped += 1; continue; }
-              }
-              const budgetRaw = keys.budget ? row[keys.budget] : null; const budget = budgetRaw ? finiteNumber(Number(String(budgetRaw).replaceAll(',','')), 'budget', { min: 0 }) : null;
-              const inserted = await db.query(`INSERT INTO leads(workspace_id,first_name,last_name,email,email_normalized,phone,phone_normalized,company_name,brand_project,opportunity_type,budget,location,status)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`, [workspaceId, keys.first ? optionalString(row[keys.first], 'firstName',120) : null, keys.last ? optionalString(row[keys.last], 'lastName',120) : null, keys.email ? optionalString(row[keys.email], 'email',320) : null, email, keys.phone ? optionalString(row[keys.phone], 'phone',80) : null, phone, keys.company ? optionalString(row[keys.company], 'company',240) : null, keys.project ? optionalString(row[keys.project], 'project',240) : null, keys.opportunity ? optionalString(row[keys.opportunity], 'opportunityType',160) : null, budget, keys.location ? optionalString(row[keys.location], 'location',240) : null, keys.status ? optionalString(row[keys.status], 'status',80) || 'New Lead' : 'New Lead']);
-              await dispatchAutomationEvent(db, { workspaceId, eventType:'lead.created', leadId:inserted.rows[0].id, eventId:`csv-import:${inserted.rows[0].id}`, actorUserId:current.userId });
-              summary.created += 1;
-            } catch (error) { summary.errors.push({ row: index + 2, message: error.message }); if (summary.errors.length >= 100) break; }
+          if (!parsed.records.length) throw new ValidationError('CSV must include at least one lead row.');
+          const definitions = await db.query("SELECT id,label,field_key,field_type,required FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type='lead' ORDER BY config->>'order',created_at,id", [workspaceId]);
+          const plan = leadCsvPlan(parsed.headers, definitions.rows);
+          const suppliedMapping = input.mapping === undefined ? plan.suggestedMapping : objectBody(input.mapping);
+          const fieldKeys = new Set(plan.fields.map(field => field.key));
+          const mapping = {};
+          const usedHeaders = new Set();
+          for (const [fieldKey, rawHeader] of Object.entries(suppliedMapping)) {
+            if (!fieldKeys.has(fieldKey)) throw new ValidationError('CSV mapping contains an unsupported field.');
+            if (rawHeader === null || rawHeader === '') continue;
+            if (typeof rawHeader !== 'string' || !parsed.headers.includes(rawHeader)) throw new ValidationError(`CSV mapping for ${fieldKey} must select a column from this file.`);
+            if (usedHeaders.has(rawHeader)) throw new ValidationError('Each CSV column can be mapped to only one field.');
+            usedHeaders.add(rawHeader); mapping[fieldKey] = rawHeader;
           }
-          await audit(db, { workspaceId, actorUserId: current.userId, action:'leads.imported', entityType:'lead', entityId:null, request, metadata:summary });
+          if (!['firstName','email','phone'].some(key => mapping[key])) throw new ValidationError('Map First Name, Email or Phone before importing.');
+          for (const field of definitions.rows.filter(item => item.required)) {
+            if (!mapping[`custom:${field.id}`]) throw new ValidationError(`Map the required custom field “${field.label}” before importing.`);
+          }
+
+          const valueFor = (record, key) => mapping[key] ? String(record.values[mapping[key]] ?? '').trim() : '';
+          const summary = { totalRows: parsed.records.length, processed: 0, created: 0, skipped: 0, errors: [] };
+          for (const record of parsed.records) {
+            summary.processed += 1;
+            try {
+              const firstName = optionalString(valueFor(record, 'firstName') || null, 'firstName', 120);
+              const lastName = optionalString(valueFor(record, 'lastName') || null, 'lastName', 120);
+              const emailRaw = valueFor(record, 'email'); const email = normalizeEmail(emailRaw || null);
+              const phoneRaw = valueFor(record, 'phone'); const phone = normalizePhone(phoneRaw || null);
+              if (!firstName && !email && !phone) throw new ValidationError('Provide a first name, email address or phone number.');
+              const company = optionalString(valueFor(record, 'companyName') || null, 'company', 240);
+              const project = optionalString(valueFor(record, 'brandProject') || null, 'project', 240);
+              const opportunity = optionalString(valueFor(record, 'opportunityType') || null, 'opportunityType', 160);
+              const budgetRaw = valueFor(record, 'budget');
+              const budget = budgetRaw ? finiteNumber(Number(budgetRaw.replaceAll(',', '')), 'budget', { min: 0 }) : null;
+              const location = optionalString(valueFor(record, 'location') || null, 'location', 240);
+              const status = valueFor(record, 'status') ? requiredString(valueFor(record, 'status'), 'status', { max: 80 }) : 'New Lead';
+              const temperatureRaw = valueFor(record, 'temperature').toLowerCase();
+              const temperature = temperatureRaw ? enumValue(temperatureRaw, 'temperature', ['hot','warm','cold']) : null;
+              const scoreRaw = valueFor(record, 'score');
+              const score = scoreRaw ? Math.trunc(finiteNumber(Number(scoreRaw.replaceAll(',', '')), 'score', { min: 0, max: 10000 })) : 0;
+              const nextAction = optionalString(valueFor(record, 'nextAction') || null, 'nextAction', 500);
+              const nextActionAtRaw = valueFor(record, 'nextActionAt');
+              const nextActionAt = nextActionAtRaw ? isoDate(nextActionAtRaw, 'nextActionAt') : null;
+              const requirement = optionalString(valueFor(record, 'requirement') || null, 'requirement', 5000);
+              const notes = optionalString(valueFor(record, 'notes') || null, 'notes', 10000);
+              const doNotContactRaw = valueFor(record, 'doNotContact').toLowerCase();
+              const booleanValues = { true: true, yes: true, '1': true, false: false, no: false, '0': false };
+              if (doNotContactRaw && !Object.hasOwn(booleanValues, doNotContactRaw)) throw new ValidationError('Do Not Contact must be yes/no, true/false or 1/0.');
+              const doNotContact = doNotContactRaw ? booleanValues[doNotContactRaw] : false;
+              const customValues = [];
+              for (const definition of definitions.rows) {
+                const raw = valueFor(record, `custom:${definition.id}`);
+                let value = raw || null;
+                if (definition.field_type === 'checkbox' && raw) {
+                  const normalized = raw.toLowerCase();
+                  if (!Object.hasOwn(booleanValues, normalized)) throw new ValidationError(`${definition.label} must be yes/no, true/false or 1/0.`);
+                  value = booleanValues[normalized];
+                } else if (definition.field_type === 'number' && raw) {
+                  value = finiteNumber(Number(raw.replaceAll(',', '')), definition.label);
+                } else if (definition.field_type === 'multiselect' && raw) {
+                  value = raw.split('|').map(item => item.trim()).filter(Boolean);
+                }
+                if (definition.required && (value === null || value === '')) throw new ValidationError(`${definition.label} is required.`);
+                if (mapping[`custom:${definition.id}`] && value !== null && value !== '') customValues.push({ id: definition.id, value });
+              }
+
+              const outcome = await transaction(db, async client => {
+                if (email || phone) {
+                  const duplicate = await client.query('SELECT id FROM leads WHERE workspace_id=$1 AND deleted_at IS NULL AND (($2::text IS NOT NULL AND email_normalized=$2) OR ($3::text IS NOT NULL AND phone_normalized=$3)) LIMIT 1', [workspaceId,email,phone]);
+                  if (duplicate.rows[0]) return 'duplicate';
+                }
+                const inserted = await client.query(`INSERT INTO leads(workspace_id,first_name,last_name,email,email_normalized,phone,phone_normalized,company_name,brand_project,opportunity_type,budget,location,status,temperature,score,next_action,next_action_at,requirement,notes,do_not_contact)
+                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id`, [workspaceId,firstName,lastName,emailRaw || null,email,phoneRaw || null,phone,company,project,opportunity,budget,location,status,temperature,score,nextAction,nextActionAt,requirement,notes,doNotContact]);
+                const leadId = inserted.rows[0].id;
+                for (const field of customValues) await client.query('INSERT INTO lead_custom_fields(workspace_id,lead_id,field_definition_id,value) VALUES($1,$2,$3,$4::jsonb)', [workspaceId,leadId,field.id,JSON.stringify(field.value)]);
+                await client.query("INSERT INTO activities(workspace_id,lead_id,user_id,type,title,body) VALUES($1,$2,$3,'system','Lead imported','Lead imported from CSV.')", [workspaceId,leadId,current.userId]);
+                const ruleResult = await applyLeadRules(client, { workspaceId, leadId, actorUserId: current.userId });
+                if (current.role === 'agent') {
+                  const assignment = await client.query('SELECT 1 FROM lead_assignments WHERE workspace_id=$1 AND lead_id=$2 AND user_id=$3 AND unassigned_at IS NULL', [workspaceId,leadId,current.userId]);
+                  if (!assignment.rows[0]) {
+                    const existing = await client.query('SELECT 1 FROM lead_assignments WHERE workspace_id=$1 AND lead_id=$2 AND unassigned_at IS NULL', [workspaceId,leadId]);
+                    if (!existing.rows[0]) {
+                      await client.query("INSERT INTO lead_assignments(workspace_id,lead_id,user_id,assigned_by,reason) VALUES($1,$2,$3,$3,'CSV import')", [workspaceId,leadId,current.userId]);
+                      await client.query('UPDATE leads SET owner_user_id=$3 WHERE workspace_id=$1 AND id=$2', [workspaceId,leadId,current.userId]);
+                    }
+                  }
+                }
+                if (ruleResult.scoreChanged) await dispatchAutomationEvent(client, { workspaceId,eventType:'lead.score_changed',leadId,eventId:`csv-score:${leadId}:${Date.now()}`,actorUserId:current.userId });
+                await dispatchAutomationEvent(client, { workspaceId,eventType:'lead.created',leadId,eventId:`csv-import:${leadId}`,actorUserId:current.userId });
+                await audit(client, { workspaceId,actorUserId:current.userId,action:'lead.created',entityType:'lead',entityId:leadId,request,metadata:{ source:'csv_import', row:record.rowNumber } });
+                return 'created';
+              });
+              if (outcome === 'duplicate') summary.skipped += 1;
+              else summary.created += 1;
+            } catch (error) {
+              summary.errors.push({ row: record.rowNumber, message: error.message });
+            }
+          }
+          await audit(db, { workspaceId,actorUserId:current.userId,action:'leads.imported',entityType:'lead',entityId:null,request,metadata:{ totalRows:summary.totalRows,processed:summary.processed,created:summary.created,skipped:summary.skipped,errorCount:summary.errors.length } });
           sendJson(response, 200, summary); return;
         }
 

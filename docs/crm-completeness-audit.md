@@ -14,7 +14,7 @@ RedBlack Core keeps PostgreSQL as the system of record. The prior Apps Script CR
 - complete practical task workflow: create, edit, complete, cancel and reopen
 - Today sales desk
 - native meeting create/edit and completed/missed/cancelled outcomes, with PostgreSQL API coverage for list and lead-filtered queries
-- CSV import/export with duplicate skipping and agent-scoped export
+- CSV import with column mapping, a sample preview, required custom fields, duplicate skipping and downloadable row errors; export includes custom fields, honors current search/status filters and stays agent-scoped
 - assignment rules (fixed owner, round robin, unassigned) and deterministic scoring rules using nested conditions, including custom-field paths; rules can be enabled/disabled and updated
 - visual automation action editor with drag/reorder, broad trigger vocabulary, nested ALL/ANY trigger conditions, waits, versioned definitions, clone/edit/test/manual-run controls and run-history visibility
 - step-level automation run inspection backed by automation_action_runs
@@ -25,7 +25,7 @@ RedBlack Core keeps PostgreSQL as the system of record. The prior Apps Script CR
 - OpenAPI expanded for CRM Builder, rule lifecycle and automation runtime inspection surfaces
 - migration 0010 adds CRM assignment/scoring rules, saved views, layouts and task types
 - migration 0011 repairs historical duplicate open automation follow-ups and installs the partial unique index that prevents recurrence
-- PostgreSQL behavioral coverage now exercises tenant-safe bulk operations, required custom fields/tags, stage movement/reordering, meeting queries, CRM rule updates, automation worker CRM actions and atomic rollback of invalid lead edits
+- PostgreSQL behavioral coverage now exercises tenant-safe bulk operations, required custom fields/tags, CSV mapping/import/export and role-scoped export, stage movement/reordering, meeting queries, CRM rule updates, automation worker CRM actions and atomic rollback of invalid lead edits
 
 ## Apps Script behavior preserved or translated
 
@@ -54,7 +54,7 @@ RedBlack Core keeps PostgreSQL as the system of record. The prior Apps Script CR
 - clearer draft-versus-publish/version lifecycle and operator retry controls for failed automation runs
 - stage archive/delete lifecycle and richer pipeline administration beyond edit/reorder/active pipeline controls
 - edit/deactivate lifecycle UI for lead sources, task types and tags, plus richer saved-view management (more filters, sort/columns and delete/rename)
-- CSV import mapping for arbitrary/custom fields, downloadable row-level error reporting and larger-import ergonomics
+- chunked and resumable imports for files larger than the current 5,000-row limit
 - further concurrency hardening around active lead email/phone identity beyond application-level duplicate checks
-- deeper behavioral E2E coverage for role-specific UI behavior, CSV mapping/import, layouts/saved views and advanced automation branches
+- deeper behavioral E2E coverage for layouts/saved views and advanced automation branches
 - final local Docker/browser acceptance across owner/admin/manager/agent/reporting/service roles before merge

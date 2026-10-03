@@ -264,3 +264,92 @@ test('agent CRM APIs stay scoped to assigned records and self task assignment', 
     await db.end();
   }
 });
+
+test('CSV import previews mappings, reports physical row errors and exports the filtered scoped data', { skip: !databaseUrl }, async () => {
+  process.env.DATABASE_URL = databaseUrl;
+  process.env.APP_ENV = 'test';
+  const [{ Pool }, { createRedBlackServer }, { createSession }, { parseCsv }] = await Promise.all([
+    import('pg'), import('../backend/src/server.js'), import('../backend/src/auth.js'), import('../backend/src/csv.js')
+  ]);
+  const db = new Pool({ connectionString: databaseUrl });
+  const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
+  const workspaceId = (await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', ['CSV Import', `csv-import-${suffix}`])).rows[0].id;
+  const otherWorkspaceId = (await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', ['CSV Foreign', `csv-foreign-${suffix}`])).rows[0].id;
+  const ownerId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`csv-owner-${suffix}@example.com`, 'CSV Owner'])).rows[0].id;
+  const agentId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`csv-agent-${suffix}@example.com`, 'CSV Agent'])).rows[0].id;
+  await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner'),($1,$3,'agent')", [workspaceId, ownerId, agentId]);
+  const customFieldId = (await db.query("INSERT INTO custom_field_definitions(workspace_id,field_key,label,field_type,required) VALUES($1,'client_segment','Client Segment','text',true) RETURNING id", [workspaceId])).rows[0].id;
+  const duplicateEmail = `existing-${suffix}@example.com`;
+  await db.query("INSERT INTO leads(workspace_id,first_name,email,email_normalized,status) VALUES($1,'Existing',$2,$2,'Qualified')", [workspaceId, duplicateEmail]);
+  await db.query("INSERT INTO leads(workspace_id,first_name,company_name,status) VALUES($1,'=1+1','Acme Formula','Qualified'),($1,'Other','Other Company','New Lead'),($2,'Foreign','Acme Foreign','Qualified'),($1,'Trashed','Acme Trashed','Qualified')", [workspaceId, otherWorkspaceId]);
+  await db.query("UPDATE leads SET deleted_at=now() WHERE workspace_id=$1 AND first_name='Trashed'", [workspaceId]);
+  const ownerSession = await createSession(db, { userId: ownerId, workspaceId });
+  const server = createRedBlackServer({ db });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}/api/v1/workspaces/${workspaceId}`;
+  const headers = {
+    'content-type': 'application/json',
+    cookie: `rb_session=${encodeURIComponent(ownerSession.token)}; rb_csrf=${encodeURIComponent(ownerSession.csrf)}`,
+    'x-csrf-token': ownerSession.csrf
+  };
+  try {
+    const csv = [
+      'Given Name,Email Address,Company Name,Deal Size,Client Segment,Status',
+      'Mira,mira@example.com,Acme New,2,Gold,Qualified',
+      `Duplicate,${duplicateEmail},Acme Duplicate,3,Silver,Qualified`,
+      '',
+      ',,Acme Missing Contact,4,Silver,Qualified',
+      'Bad Budget,bad-budget@example.com,Acme Bad Budget,not-a-number,Silver,Qualified'
+    ].join('\r\n');
+    const previewResponse = await fetch(`${base}/leads/import/preview`, { method: 'POST', headers, body: JSON.stringify({ csv }) });
+    assert.equal(previewResponse.status, 200);
+    const preview = await previewResponse.json();
+    assert.equal(preview.rowCount, 4);
+    assert.equal(preview.suggestedMapping.firstName, 'Given Name');
+    assert.equal(preview.suggestedMapping.email, 'Email Address');
+    assert.equal(preview.suggestedMapping[`custom:${customFieldId}`], 'Client Segment');
+    const importResponse = await fetch(`${base}/leads/import`, { method: 'POST', headers, body: JSON.stringify({ csv, mapping: preview.suggestedMapping }) });
+    assert.equal(importResponse.status, 200);
+    const summary = await importResponse.json();
+    assert.equal(summary.totalRows, 4);
+    assert.equal(summary.processed, 4);
+    assert.equal(summary.created, 1);
+    assert.equal(summary.skipped, 1);
+    assert.deepEqual(summary.errors.map(error => error.row), [5, 6]);
+    const imported = await db.query("SELECT id FROM leads WHERE workspace_id=$1 AND email_normalized='mira@example.com'", [workspaceId]);
+    const importedField = await db.query('SELECT value FROM lead_custom_fields WHERE workspace_id=$1 AND lead_id=$2 AND field_definition_id=$3', [workspaceId, imported.rows[0].id, customFieldId]);
+    assert.equal(importedField.rows[0].value, 'Gold');
+    const importAudit = await db.query("SELECT metadata FROM audit_logs WHERE workspace_id=$1 AND action='leads.imported' ORDER BY created_at DESC LIMIT 1", [workspaceId]);
+    assert.equal(importAudit.rows[0].metadata.errorCount, 2);
+
+    const exportResponse = await fetch(`${base}/leads/export?q=Acme&status=Qualified`, { headers });
+    assert.equal(exportResponse.status, 200);
+    assert.match(exportResponse.headers.get('content-type'), /text\/csv/);
+    assert.match(exportResponse.headers.get('content-disposition'), /redblack-leads\.csv/);
+    const exported = parseCsv(await exportResponse.text());
+    assert.equal(exported.records.length, 2);
+    assert.equal(exported.headers.includes('Custom: Client Segment'), true);
+    assert.equal(exported.records.some(record => record.values['First Name'] === "'=1+1"), true);
+    assert.equal(exported.records.some(record => record.values.Company === 'Acme Foreign' || record.values.Company === 'Acme Trashed'), false);
+    assert.equal(exported.records.some(record => record.values['Custom: Client Segment'] === 'Gold'), true);
+
+    const agentSession = await createSession(db, { userId: agentId, workspaceId });
+    await db.query("INSERT INTO leads(workspace_id,first_name,company_name,status) VALUES($1,'Assigned','AgentScope Owned','Qualified'),($1,'Unassigned','AgentScope Other','Qualified')", [workspaceId]);
+    const agentLeads = await db.query("SELECT id FROM leads WHERE workspace_id=$1 AND company_name='AgentScope Owned'", [workspaceId]);
+    await db.query("INSERT INTO lead_assignments(workspace_id,lead_id,user_id,assigned_by,reason) VALUES($1,$2,$3,$3,'test')", [workspaceId, agentLeads.rows[0].id, agentId]);
+    const agentHeaders = {
+      'content-type': 'application/json',
+      cookie: `rb_session=${encodeURIComponent(agentSession.token)}; rb_csrf=${encodeURIComponent(agentSession.csrf)}`,
+      'x-csrf-token': agentSession.csrf
+    };
+    const agentExportResponse = await fetch(`${base}/leads/export?q=AgentScope`, { headers: agentHeaders });
+    assert.equal(agentExportResponse.status, 200);
+    const agentExport = parseCsv(await agentExportResponse.text());
+    assert.equal(agentExport.records.length, 1);
+    assert.equal(agentExport.records[0].values.Company, 'AgentScope Owned');
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await db.end();
+  }
+});

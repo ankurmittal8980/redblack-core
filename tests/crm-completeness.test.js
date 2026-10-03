@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const root = path.resolve(new URL('..', import.meta.url).pathname);
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const server = fs.readFileSync(path.join(root, 'backend/src/server.js'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'frontend/public/app.js'), 'utf8');
 const index = fs.readFileSync(path.join(root, 'frontend/public/index.html'), 'utf8');
@@ -54,7 +55,10 @@ test('CRM builder exposes custom fields, tags, meetings and import/export', () =
   assert.match(app, /tagForm/);
   assert.match(app, /async function renderMeetings/);
   assert.match(app, /csvImportForm/);
-  assert.equal(app.includes("href=\"\${apiRoot}\${workspacePath('leads/export')}\""), true);
+  assert.equal(app.includes("const exportHref = `${apiRoot}${workspacePath('leads/export')}${"), true);
+  assert.equal(app.includes("exportParams.set('q', appState.leadSearch)"), true);
+  assert.equal(app.includes("leads/import/preview"), true);
+  assert.equal(app.includes("download-import-errors"), true);
 });
 
 test('pipeline board uses persisted stage state and drag drop movement', () => {
