@@ -25,6 +25,7 @@ export const OPENAPI_SPEC = Object.freeze({
     [`${workspace}/leads/trash`]: protectedGet('List trashed leads'),
     [`${workspace}/leads/bulk`]: protectedWrite('Bulk trash, restore, status or owner update'),
     [`${workspace}/leads/{leadId}/restore`]: protectedWrite('Restore a trashed lead'),
+    [`${workspace}/leads/{leadId}/permanent`]: protectedWrite('Permanently delete a trashed lead', 'delete'),
     [`${workspace}/leads/{leadId}`]: { get: { summary: 'Read a lead and timeline', security: [{ cookieSession: [] }], parameters: [{ $ref: '#/components/parameters/workspaceId' }, { name: 'leadId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }], responses: { '200': { description: 'Lead record' }, '404': { description: 'Not found in this workspace' } } }, patch: protectedWrite('Update a lead', 'patch') },
     [`${workspace}/pipelines`]: { ...protectedGet('List pipelines and stages'), ...protectedWrite('Create a pipeline') },
     [`${workspace}/leads/{leadId}/stage`]: protectedWrite('Move a lead to a pipeline stage'),
