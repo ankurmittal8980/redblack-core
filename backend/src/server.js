@@ -723,34 +723,37 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             }
             const values = [workspaceId, leadId]; const assignments = [];
             for (const [column, value] of updates) { values.push(value); assignments.push(`${column} = $${values.length}`); }
-            let result;
-            if (assignments.length) result = await db.query(`UPDATE leads SET ${assignments.join(', ')}, updated_at = now() WHERE workspace_id = $1 AND id = $2 RETURNING *`, values);
-            else result = await db.query('SELECT * FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceId, leadId]);
-            if (hasCustomFields) {
-              const entries = Object.entries(input.customFields);
-              for (const [fieldId, value] of entries) {
-                const definitionId = uuid(fieldId, 'customFieldId');
-                const definition = await db.query("SELECT id,required FROM custom_field_definitions WHERE workspace_id=$1 AND id=$2 AND entity_type='lead'", [workspaceId, definitionId]);
-                if (!definition.rows[0]) throw new HttpError(400, 'INVALID_CUSTOM_FIELD', 'A custom field does not belong to this workspace.');
-                if (definition.rows[0].required && (value === null || value === '' || (Array.isArray(value) && value.length === 0))) throw new ValidationError('Required custom fields cannot be empty.');
-                await db.query(`INSERT INTO lead_custom_fields(workspace_id,lead_id,field_definition_id,value) VALUES($1,$2,$3,$4::jsonb)
-                  ON CONFLICT(lead_id,field_definition_id) DO UPDATE SET workspace_id=EXCLUDED.workspace_id,value=EXCLUDED.value`, [workspaceId, leadId, definitionId, JSON.stringify(value)]);
+            const result = await transaction(db, async client => {
+              let updated;
+              if (assignments.length) updated = await client.query(`UPDATE leads SET ${assignments.join(', ')}, updated_at = now() WHERE workspace_id = $1 AND id = $2 RETURNING *`, values);
+              else updated = await client.query('SELECT * FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceId, leadId]);
+              if (hasCustomFields) {
+                const entries = Object.entries(input.customFields);
+                for (const [fieldId, value] of entries) {
+                  const definitionId = uuid(fieldId, 'customFieldId');
+                  const definition = await client.query("SELECT id,required FROM custom_field_definitions WHERE workspace_id=$1 AND id=$2 AND entity_type='lead'", [workspaceId, definitionId]);
+                  if (!definition.rows[0]) throw new HttpError(400, 'INVALID_CUSTOM_FIELD', 'A custom field does not belong to this workspace.');
+                  if (definition.rows[0].required && (value === null || value === '' || (Array.isArray(value) && value.length === 0))) throw new ValidationError('Required custom fields cannot be empty.');
+                  await client.query(`INSERT INTO lead_custom_fields(workspace_id,lead_id,field_definition_id,value) VALUES($1,$2,$3,$4::jsonb)
+                    ON CONFLICT(lead_id,field_definition_id) DO UPDATE SET workspace_id=EXCLUDED.workspace_id,value=EXCLUDED.value`, [workspaceId, leadId, definitionId, JSON.stringify(value)]);
+                }
               }
-            }
-            if (hasTags) {
-              const tagIds = [...new Set(input.tagIds.map(value => uuid(value, 'tagId')))];
-              if (tagIds.length) {
-                const valid = await db.query('SELECT id FROM tags WHERE workspace_id=$1 AND id=ANY($2::uuid[])', [workspaceId, tagIds]);
-                if (valid.rows.length !== tagIds.length) throw new HttpError(400, 'INVALID_TAG', 'One or more tags do not belong to this workspace.');
+              if (hasTags) {
+                const tagIds = [...new Set(input.tagIds.map(value => uuid(value, 'tagId')))];
+                if (tagIds.length) {
+                  const valid = await client.query('SELECT id FROM tags WHERE workspace_id=$1 AND id=ANY($2::uuid[])', [workspaceId, tagIds]);
+                  if (valid.rows.length !== tagIds.length) throw new HttpError(400, 'INVALID_TAG', 'One or more tags do not belong to this workspace.');
+                }
+                await client.query('DELETE FROM lead_tags WHERE workspace_id=$1 AND lead_id=$2', [workspaceId, leadId]);
+                for (const tagId of tagIds) await client.query('INSERT INTO lead_tags(workspace_id,lead_id,tag_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING', [workspaceId, leadId, tagId]);
               }
-              await db.query('DELETE FROM lead_tags WHERE workspace_id=$1 AND lead_id=$2', [workspaceId, leadId]);
-              for (const tagId of tagIds) await db.query('INSERT INTO lead_tags(workspace_id,lead_id,tag_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING', [workspaceId, leadId, tagId]);
-            }
-            await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.updated', entityType: 'lead', entityId: leadId, request, metadata: { fields: [...updates.keys()], customFields: hasCustomFields, tags: hasTags } });
-            const ruleResult = await applyLeadRules(db, { workspaceId, leadId, actorUserId: current.userId });
-            await dispatchAutomationEvent(db, { workspaceId, eventType: 'lead.updated', leadId, eventId: `lead-updated:${leadId}:${Date.now()}`, actorUserId: current.userId, eventData: { fields: [...updates.keys()] } });
-            if (ruleResult.scoreChanged) await dispatchAutomationEvent(db, { workspaceId, eventType: 'lead.score_changed', leadId, eventId: `lead-score:${leadId}:${Date.now()}`, actorUserId: current.userId });
-            sendJson(response, 200, result.rows[0]); return;
+              await audit(client, { workspaceId, actorUserId: current.userId, action: 'lead.updated', entityType: 'lead', entityId: leadId, request, metadata: { fields: [...updates.keys()], customFields: hasCustomFields, tags: hasTags } });
+              const ruleResult = await applyLeadRules(client, { workspaceId, leadId, actorUserId: current.userId });
+              await dispatchAutomationEvent(client, { workspaceId, eventType: 'lead.updated', leadId, eventId: `lead-updated:${leadId}:${Date.now()}`, actorUserId: current.userId, eventData: { fields: [...updates.keys()] } });
+              if (ruleResult.scoreChanged) await dispatchAutomationEvent(client, { workspaceId, eventType: 'lead.score_changed', leadId, eventId: `lead-score:${leadId}:${Date.now()}`, actorUserId: current.userId });
+              return updated.rows[0];
+            });
+            sendJson(response, 200, result); return;
           }
           if (request.method === 'DELETE' && !action) {
             requirePermission(context, 'crm:write');
