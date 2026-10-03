@@ -368,9 +368,12 @@ $('#viewRoot').addEventListener('change', async event => {
       showToast('Lead moved to the new stage.'); await renderPipelines();
     } catch (error) { showToast(error.message, 'error'); }
   }
-  if (event.target.matches('[data-action="complete-task"]') && event.target.checked) {
-    try { await api(`${workspacePath(`tasks/${encodeURIComponent(event.target.dataset.id)}`)}`, { method: 'PATCH', body: { status: 'completed' } }); showToast('Task completed.'); await renderView(appState.view); }
-    catch (error) { event.target.checked = false; showToast(error.message, 'error'); }
+  if (event.target.matches('[data-action="complete-task"]')) {
+    const checkbox = event.target.matches('input[type="checkbox"]');
+    if (!checkbox || event.target.checked) {
+      try { await api(`${workspacePath(`tasks/${encodeURIComponent(event.target.dataset.id)}`)}`, { method: 'PATCH', body: { status: 'completed' } }); showToast('Task completed.'); await renderView(appState.view); }
+      catch (error) { if (checkbox) event.target.checked = false; showToast(error.message, 'error'); }
+    }
   }
 });
 
