@@ -14,6 +14,7 @@ import { loginByIp, loginByEmail, bootstrapByIp } from './rate-limit.js';
 import { quoteUsage } from './pricing.js';
 import { ValidationError, decimal, objectBody, requiredString, optionalString, uuid, enumValue, finiteNumber, isoDate, slug, normalizeEmail, normalizePhone, parseCursor, makeCursor } from './validation.js';
 import { communications, calling } from './providers.js';
+import { AIGateway } from './ai-gateway.js';
 import { OPENAPI_SPEC } from './openapi.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -968,6 +969,12 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             RETURNING model_routes, ai_defaults, communication_defaults, updated_at`, [workspaceId, JSON.stringify(settings.modelRoutes), JSON.stringify(settings.aiDefaults), JSON.stringify(settings.communicationDefaults), current.userId]);
           await audit(db, { workspaceId, actorUserId: current.userId, action: 'control_center.settings_updated', entityType: 'workspace_control_settings', entityId: workspaceId, request });
           sendJson(response, 200, updated.rows[0]); return;
+        }
+        if (suffix === 'ai/complete' && request.method === 'POST') {
+          requirePermission(context, 'crm:read'); const input = await body();
+          const gateway = new AIGateway({ db });
+          const result = await gateway.complete({ workspaceId, userId: current.userId, messages: input.messages, model: input.model ?? null, processing: input.processing ?? 'standard', idempotencyKey: request.headers['idempotency-key'] ?? undefined, allowFallback: input.allowFallback !== false, toolCalls: Boolean(input.toolCalls) });
+          sendJson(response, 200, result); return;
         }
         if (suffix === 'automations/install-defaults' && request.method === 'POST') {
           requirePermission(context, 'automation:manage');
