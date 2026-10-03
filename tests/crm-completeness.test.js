@@ -54,6 +54,7 @@ test('CRM builder exposes custom fields, tags, meetings and import/export', () =
   assert.match(app, /tagForm/);
   assert.match(app, /async function renderMeetings/);
   assert.match(app, /csvImportForm/);
+  assert.match(app, /href="\\$\\{apiRoot\\}\\$\\{workspacePath\\('leads\\/export'\\)\\}"/);
 });
 
 test('pipeline board uses persisted stage state and drag drop movement', () => {
