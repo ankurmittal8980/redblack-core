@@ -333,6 +333,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         setSessionCookies(response, created.token, created.csrf, created.expiresAt);
         sendJson(response, selected ? 200 : 409, {
           user: publicUser(user), workspace: selected,
+          role: selected?.role ?? null,
           workspaces: selected ? undefined : memberships.rows,
           code: selected ? undefined : 'WORKSPACE_SELECTION_REQUIRED'
         }); return;
