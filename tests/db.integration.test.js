@@ -219,6 +219,7 @@ test('agent CRM APIs stay scoped to assigned records and self task assignment', 
   const ownUnlinkedActivity = (await db.query("INSERT INTO activities(workspace_id,user_id,type,title) VALUES($1,$2,'note','Own unlinked activity') RETURNING id", [workspaceId, agentId])).rows[0].id;
   const ownedCall = (await db.query("INSERT INTO calls(workspace_id,lead_id,user_id,direction,status) VALUES($1,$2,$3,'outbound','answered') RETURNING id", [workspaceId, ownedLead, peerId])).rows[0].id;
   const otherCall = (await db.query("INSERT INTO calls(workspace_id,lead_id,user_id,direction,status) VALUES($1,$2,$3,'outbound','answered') RETURNING id", [workspaceId, otherLead, peerId])).rows[0].id;
+  await db.query("INSERT INTO meetings(workspace_id,lead_id,owner_user_id,starts_at,status) VALUES($1,$2,$3,now(),'scheduled'),($1,$4,$5,now(),'scheduled')", [workspaceId, ownedLead, agentId, otherLead, peerId]);
   const session = await createSession(db, { userId: agentId, workspaceId });
   const server = createRedBlackServer({ db });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -230,6 +231,12 @@ test('agent CRM APIs stay scoped to assigned records and self task assignment', 
     'x-csrf-token': session.csrf
   };
   try {
+    const dashboardResponse = await fetch(`${base}/reports/dashboard`, { headers });
+    assert.equal(dashboardResponse.status, 200);
+    const dashboard = (await dashboardResponse.json()).summary;
+    assert.equal(Number(dashboard.total_leads), 1);
+    assert.equal(Number(dashboard.meetings), 1);
+
     const activitiesResponse = await fetch(`${base}/activities?limit=100`, { headers });
     assert.equal(activitiesResponse.status, 200);
     const activities = (await activitiesResponse.json()).data.map(item => item.id);
