@@ -135,6 +135,14 @@ async function renderDashboard() {
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Pipeline health</h2><p class="panel-subtitle">Open a pipeline to review stages and movement</p></div><button class="button button-secondary button-small" data-view="pipelines">Explore pipelines</button></div><div class="panel-body"><div class="metrics">${(pipelines.data ?? []).map(p => metric(p.name, (p.stages ?? []).length, 'Configured stages')).join('')}</div></div></section>`);
 }
 
+async function renderTrash() {
+  const result = await api(workspacePath('leads/trash'));
+  const canRestore = ['owner','admin','manager','agent'].includes(appState.role);
+  const rows = (result.data ?? []).map(lead => `<tr><td><div class="lead-name">${escapeHtml([lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</div><div class="lead-sub">${escapeHtml(lead.email || lead.phone || lead.company_name || '')}</div></td><td>${badge(lead.status)}</td><td>${fmtDate(lead.deleted_at, { time: true })}</td><td>${canRestore ? `<button class="quiet-button" data-action="restore-lead" data-id="${escapeHtml(lead.id)}">Restore</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Trash is empty.</td></tr>';
+  setPage(`${pageHeading('DATA SAFETY', 'Lead trash', 'Archived leads remain recoverable and auditable.', '<button class="button button-secondary" data-view="leads">Back to leads</button>')}
+    <section class="panel"><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Deleted</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div></section>`);
+}
+
 async function renderLeads() {
   const params = new URLSearchParams({ limit: '50' });
   if (appState.cursor) params.set('cursor', appState.cursor);
@@ -268,6 +276,7 @@ async function renderView(view) {
   try {
     if (view === 'dashboard') await renderDashboard();
     else if (view === 'leads') await renderLeads();
+    else if (view === 'trash') await renderTrash();
     else if (view === 'pipelines') await renderPipelines();
     else if (view === 'tasks') await renderTasks();
     else if (view === 'communications') await renderCommunications();
@@ -345,6 +354,7 @@ $('#viewRoot').addEventListener('click', async event => {
     if (action === 'toggle-new-lead') $('#newLeadPanel').classList.toggle('hidden');
     else if (action === 'new-lead') { renderView('leads'); setTimeout(() => $('#newLeadPanel')?.classList.remove('hidden'), 0); }
     else if (action === 'lead-details') await renderLeadDetail(id);
+    else if (action === 'restore-lead') { await api(`${workspacePath(`leads/${encodeURIComponent(id)}/restore`)}`, { method: 'POST', body: {} }); showToast('Lead restored.'); await renderTrash(); }
     else if (action === 'next-leads') { appState.cursor = button.dataset.cursor; await renderLeads(); }
     else if (action === 'clear-lead-filters') { appState.cursor = null; appState.leadSearch = ''; appState.leadStatus = ''; await renderLeads(); }
     else if (action === 'toggle-task-form') $('#taskFormPanel').classList.toggle('hidden');
