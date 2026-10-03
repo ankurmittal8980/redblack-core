@@ -212,9 +212,9 @@ async function renderLeadDetail(leadId) {
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Timeline</h2><p class="panel-subtitle">Recent calls, tasks, messages and notes</p></div></div><div class="panel-body">${(timeline.data ?? []).map(item => `<div class="task-row"><span class="badge">${escapeHtml(item.item_type)}</span><div><div class="task-title">${escapeHtml(item.title)}</div><div class="task-meta">${escapeHtml(item.body || item.kind || '')}</div></div><div class="task-due">${fmtDate(item.happened_at, { time: true })}</div></div>`).join('') || '<div class="empty-state">No timeline events yet.</div>'}</div></section>`);
 }
 
-async function renderPipelines() {
+async function renderPipelines(selectedPipelineId = null) {
   const [pipelines, leads] = await Promise.all([api(workspacePath('pipelines')), api(`${workspacePath('leads')}?limit=100`)]);
-  const first = pipelines.data?.[0];
+  const first = pipelines.data?.find(item => item.id === selectedPipelineId) ?? pipelines.data?.[0];
   const canManage = ['owner','admin'].includes(appState.role);
   const cards = (leads.data ?? []).map(lead => ({ lead, current: null }));
   if (first) {
@@ -224,7 +224,7 @@ async function renderPipelines() {
     }).join('');
     setPage(`${pageHeading('OPPORTUNITY FLOW', 'Pipelines', 'Move every opportunity forward with a clear next step.')}
       <section class="panel"><div class="panel-header"><div><h2 class="panel-title">${escapeHtml(first.name)}</h2><p class="panel-subtitle">Showing up to 100 active leads. Drag lead cards between stages; movement is recorded in history.</p></div><select id="pipelineChoice">${pipelines.data.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === first.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="panel-body"><div class="pipeline-board">${board}</div></div></section>${canManage ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Pipeline builder</h2></div><div class="panel-body"><form id="pipelineForm" class="inline-form"><label>Name<input name="name" required maxlength="120"></label><label>Slug<input name="slug" required maxlength="120"></label><button class="button button-secondary">Create pipeline</button></form><form id="stageForm" class="inline-form"><input type="hidden" name="pipelineId" value="${escapeHtml(first.id)}"><label>Stage name<input name="name" required maxlength="120"></label><label>Slug<input name="slug" required maxlength="120"></label><label>Position<input name="position" type="number" min="0" value="${first.stages.length}"></label><label class="checkbox-row"><input name="isWon" type="checkbox"> Won</label><label class="checkbox-row"><input name="isLost" type="checkbox"> Lost</label><button class="button button-secondary">Add stage</button></form></div></section>` : ''}`);
-    $('#pipelineChoice').addEventListener('change', () => renderPipelineChoice(pipelines.data, $('#pipelineChoice').value));
+    $('#pipelineChoice').addEventListener('change', () => renderPipelines($('#pipelineChoice').value));
     bindPipelineDnD();
   } else setPage(`${pageHeading('OPPORTUNITY FLOW', 'Pipelines', 'No pipelines are available yet.')}<section class="panel"><div class="empty-state">Ask a workspace admin to create a pipeline.</div></section>`);
 }
