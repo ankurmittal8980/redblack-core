@@ -281,10 +281,18 @@ function openTaskEditor(taskId) {
 async function renderMeetings() {
   const [meetings, leads] = await Promise.all([api(`${workspacePath('meetings')}?limit=100`), api(`${workspacePath('leads')}?limit=100`)]);
   const canWrite = ['owner','admin','manager','agent'].includes(appState.role);
-  const rows = (meetings.data ?? []).map(item => `<tr><td>${fmtDate(item.starts_at, { time: true })}</td><td>${escapeHtml(item.meeting_type || 'Meeting')}</td><td>${badge(item.status)}</td><td>${escapeHtml(item.notes || '—')}</td><td>${canWrite ? `<button class="quiet-button" data-action="meeting-status" data-status="completed" data-id="${escapeHtml(item.id)}">Complete</button> <button class="quiet-button" data-action="meeting-status" data-status="missed" data-id="${escapeHtml(item.id)}">Missed</button> <button class="quiet-button" data-action="meeting-status" data-status="cancelled" data-id="${escapeHtml(item.id)}">Cancel</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty-state">No meetings scheduled.</td></tr>';
+  appState.meetingCache = meetings.data ?? [];
+  const rows = appState.meetingCache.map(item => `<tr><td>${fmtDate(item.starts_at, { time: true })}</td><td>${escapeHtml(item.meeting_type || 'Meeting')}</td><td>${badge(item.status)}</td><td>${escapeHtml(item.notes || '—')}</td><td>${canWrite ? `<button class="quiet-button" data-action="edit-meeting" data-id="${escapeHtml(item.id)}">Edit</button> <button class="quiet-button" data-action="meeting-status" data-status="completed" data-id="${escapeHtml(item.id)}">Complete</button> <button class="quiet-button" data-action="meeting-status" data-status="missed" data-id="${escapeHtml(item.id)}">Missed</button> <button class="quiet-button" data-action="meeting-status" data-status="cancelled" data-id="${escapeHtml(item.id)}">Cancel</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty-state">No meetings scheduled.</td></tr>';
   setPage(`${pageHeading('APPOINTMENTS', 'Meetings & calendar', 'Schedule appointments and record completed, missed or cancelled outcomes.')}
     ${canWrite ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Schedule meeting</h2></div><form id="meetingForm" class="panel-body"><div class="field-grid"><label>Lead<select name="leadId"><option value="">No linked lead</option>${(leads.data ?? []).map(lead => `<option value="${escapeHtml(lead.id)}">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || lead.email || lead.phone || lead.id)}</option>`).join('')}</select></label><label>Type<input name="meetingType" value="Consultation" maxlength="120"></label><label>Starts<input name="startsAt" type="datetime-local" required></label><label>Ends<input name="endsAt" type="datetime-local"></label><label class="span-2">Notes<textarea name="notes" maxlength="5000"></textarea></label></div><button class="button button-primary">Schedule meeting</button></form></section>` : ''}
+    <section id="meetingEditPanel" class="panel hidden"></section>
     <section class="panel"><div class="panel-header"><h2 class="panel-title">Calendar queue</h2><span class="badge">${fmtNumber(meetings.data?.length ?? 0)}</span></div><div class="table-wrap"><table><thead><tr><th>When</th><th>Type</th><th>Status</th><th>Notes</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
+}
+
+function openMeetingEditor(meetingId) {
+  const item=(appState.meetingCache??[]).find(meeting=>meeting.id===meetingId); if(!item)return;
+  const panel=$('#meetingEditPanel'); const start=item.starts_at?new Date(item.starts_at).toISOString().slice(0,16):''; const end=item.ends_at?new Date(item.ends_at).toISOString().slice(0,16):'';
+  panel.innerHTML=`<div class="panel-header"><h2 class="panel-title">Edit meeting</h2><button class="text-button" data-action="close-meeting-edit">Close</button></div><form id="meetingEditForm" data-meeting-id="${escapeHtml(item.id)}" class="panel-body"><div class="field-grid"><label>Type<input name="meetingType" value="${escapeHtml(item.meeting_type||'')}"></label><label>Status<select name="status">${['scheduled','completed','missed','cancelled'].map(v=>`<option ${item.status===v?'selected':''}>${v}</option>`).join('')}</select></label><label>Starts<input name="startsAt" type="datetime-local" value="${escapeHtml(start)}" required></label><label>Ends<input name="endsAt" type="datetime-local" value="${escapeHtml(end)}"></label><label class="span-2">Notes<textarea name="notes">${escapeHtml(item.notes||'')}</textarea></label></div><button class="button button-primary">Save meeting</button></form>`; panel.classList.remove('hidden');
 }
 
 async function renderCommunications() {
@@ -492,6 +500,8 @@ $('#viewRoot').addEventListener('click', async event => {
     else if (action === 'close-task-edit') $('#taskEditPanel')?.classList.add('hidden');
     else if (action === 'task-status') { await api(`${workspacePath(`tasks/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: button.dataset.status } }); showToast('Task status updated.'); await renderTasks(); }
     else if (action === 'meeting-status') { await api(`${workspacePath(`meetings/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: button.dataset.status } }); showToast('Meeting updated.'); await renderMeetings(); }
+    else if (action === 'edit-meeting') openMeetingEditor(id);
+    else if (action === 'close-meeting-edit') $('#meetingEditPanel')?.classList.add('hidden');
     else if (action === 'field-required') { await api(`${workspacePath(`custom-fields/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { required: button.dataset.required === 'true' } }); showToast('Field settings updated.'); await renderWorkspace(); }
     else if (action === 'toggle-automation-form') $('#automationFormPanel').classList.toggle('hidden');
     else if (action === 'add-automation-step') { appState.automationSteps ??= []; appState.automationSteps.push({ type: button.dataset.type, config: automationDefaultConfig(button.dataset.type) }); renderAutomationSteps(); }
@@ -584,6 +594,8 @@ $('#viewRoot').addEventListener('submit', async event => {
     } else if (form.id === 'meetingForm') {
       await api(workspacePath('meetings'), { method: 'POST', body: { leadId: input.leadId || null, meetingType: input.meetingType || null, startsAt: localDateTime(input.startsAt), endsAt: input.endsAt ? localDateTime(input.endsAt) : null, status: 'scheduled', notes: input.notes || null } });
       showToast('Meeting scheduled.'); await renderMeetings();
+    } else if (form.id === 'meetingEditForm') {
+      const meetingId=form.dataset.meetingId; await api(`${workspacePath(`meetings/${encodeURIComponent(meetingId)}`)}`,{method:'PATCH',body:{meetingType:input.meetingType||null,status:input.status,startsAt:localDateTime(input.startsAt),endsAt:input.endsAt?localDateTime(input.endsAt):null,notes:input.notes||null}}); showToast('Meeting saved.'); await renderMeetings();
     } else if (form.id === 'messageDraftForm') {
       await api(workspacePath('messages'), { method: 'POST', body: input }); showToast('Message draft saved.'); await renderCommunications();
     } else if (form.id === 'callForm') {
