@@ -984,6 +984,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           const leadId = input.leadId ? uuid(input.leadId, 'leadId') : null;
           if (leadId) await leadVisible(db, context, leadId);
           const assignedTo = input.assignedTo ? uuid(input.assignedTo, 'assignedTo') : current.userId;
+          if (context.role === 'agent' && assignedTo !== current.userId) throw new HttpError(403, 'FORBIDDEN', 'Agents may only assign tasks to themselves.');
+          const assignee = await db.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND active=true', [workspaceId, assignedTo]);
+          if (!assignee.rows[0]) throw new HttpError(400, 'ASSIGNEE_NOT_IN_WORKSPACE', 'Task assignee must be an active workspace member.');
           const result = await db.query(
             `INSERT INTO tasks(workspace_id, lead_id, assigned_to, created_by, title, description, due_at, status, priority, source, task_type, touch_number)
              VALUES($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9,$10,$11) RETURNING *`,
@@ -1024,8 +1027,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         if (suffix === 'activities' && request.method === 'GET') {
           requirePermission(context, 'crm:read'); const values = [workspaceId]; const filters = ['workspace_id = $1'];
-          if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filters.push(`lead_id = $${values.length}`); }
-          values.push(pageSize(url)); const result = await db.query(`SELECT * FROM activities WHERE ${filters.join(' AND ')} ORDER BY occurred_at DESC, id LIMIT $${values.length}`, values);
+          if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filters.push(`lead_id = ${values.length}`); }
+          else if (context.role === 'agent') { values.push(current.userId); filters.push(`(user_id = ${values.length} OR (lead_id IS NOT NULL AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=activities.workspace_id AND a.lead_id=activities.lead_id AND a.user_id=${values.length} AND a.unassigned_at IS NULL)))`); }
+          values.push(pageSize(url)); const result = await db.query(`SELECT * FROM activities WHERE ${filters.join(' AND ')} ORDER BY occurred_at DESC, id LIMIT ${values.length}`, values);
           sendJson(response, 200, { data: result.rows }); return;
         }
         if (suffix === 'activities' && request.method === 'POST') {
@@ -1084,8 +1088,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         if (suffix === 'calls' && request.method === 'GET') {
           requirePermission(context, 'crm:read'); const values = [workspaceId]; let filter = 'workspace_id = $1';
-          if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filter += ` AND lead_id = $${values.length}`; }
-          values.push(pageSize(url)); const result = await db.query(`SELECT * FROM calls WHERE ${filter} ORDER BY started_at DESC NULLS LAST, id LIMIT $${values.length}`, values);
+          if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filter += ` AND lead_id = ${values.length}`; }
+          else if (context.role === 'agent') { values.push(current.userId); filter += ` AND (user_id = ${values.length} OR (lead_id IS NOT NULL AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=calls.workspace_id AND a.lead_id=calls.lead_id AND a.user_id=${values.length} AND a.unassigned_at IS NULL)))`; }
+          values.push(pageSize(url)); const result = await db.query(`SELECT * FROM calls WHERE ${filter} ORDER BY started_at DESC NULLS LAST, id LIMIT ${values.length}`, values);
           sendJson(response, 200, { data: result.rows }); return;
         }
         if (suffix === 'calls' && request.method === 'POST') {
@@ -1114,8 +1119,12 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           requirePermission(context, 'crm:write'); const callId = uuid(callNoteMatch[1], 'callId'); const input = await body();
           const result = await db.query(
             `INSERT INTO call_notes(workspace_id, call_id, author_user_id, note)
-             SELECT $1, id, $3, $4 FROM calls WHERE workspace_id = $1 AND id = $2 RETURNING *`,
-            [workspaceId, callId, current.userId, requiredString(input.note, 'note', { max: 5000 })]
+             SELECT $1, c.id, $3, $4 FROM calls c
+              WHERE c.workspace_id = $1 AND c.id = $2
+                AND ($5 <> 'agent' OR c.user_id = $3 OR (c.lead_id IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM lead_assignments a WHERE a.workspace_id=c.workspace_id AND a.lead_id=c.lead_id AND a.user_id=$3 AND a.unassigned_at IS NULL
+                ))) RETURNING *`,
+            [workspaceId, callId, current.userId, requiredString(input.note, 'note', { max: 5000 }), context.role]
           );
           if (!result.rows[0]) throw new HttpError(404, 'CALL_NOT_FOUND', 'Call was not found.');
           sendJson(response, 201, result.rows[0]); return;
