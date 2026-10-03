@@ -79,7 +79,8 @@ async function executeAction(run, action, position) {
       const task = await client.query(
         `INSERT INTO tasks(workspace_id, lead_id, assigned_to, created_by, title, description, due_at, status, priority, source, task_type)
          SELECT $1,$2,$3,$4,$5,$6,now()+($7::text || ' minutes')::interval,'pending',0,'automation','follow_up'
-         WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE workspace_id=$1 AND lead_id=$2 AND source='automation' AND title=$5 AND status IN ('pending','in_progress')) RETURNING id`,
+         WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE workspace_id=$1 AND lead_id=$2 AND source='automation' AND title=$5 AND status IN ('pending','in_progress'))
+         ON CONFLICT DO NOTHING RETURNING id`,
         [run.workspace_id, run.lead_id, assignedTo, run.metadata?.requestedBy ?? null, config.title, config.description ?? null, String(config.dueInMinutes ?? 0)]
       );
       result = { taskId: task.rows[0]?.id ?? null, duplicate: !task.rows[0] };
