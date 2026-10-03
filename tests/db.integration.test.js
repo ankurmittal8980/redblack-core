@@ -67,6 +67,24 @@ test('new lead event runs the default automation and creates exactly one follow-
       [workspaceId, lead.rows[0].id, user.rows[0].id]
     );
     assert.equal(duplicate.rowCount, 0);
+
+    const definition = { triggerType: 'manual', triggerConfig: {}, actions: [
+      { type: 'update_lead', config: { status: 'Qualified', score: 75 } },
+      { type: 'assign_owner', config: {} },
+      { type: 'create_note', config: { title: 'Qualified automatically', body: 'Worker action executed.' } },
+      { type: 'schedule_follow_up', config: { title: 'Call qualified lead', dueInMinutes: 60 } }
+    ] };
+    const automation = await db.query("INSERT INTO automations(workspace_id,name,active,trigger_type,trigger_config,created_by) VALUES($1,'Worker CRM actions',false,'manual','{}'::jsonb,$2) RETURNING id", [workspaceId, user.rows[0].id]);
+    const version = await db.query('INSERT INTO automation_versions(workspace_id,automation_id,version_number,definition,created_by) VALUES($1,$2,1,$3::jsonb,$4) RETURNING id', [workspaceId, automation.rows[0].id, JSON.stringify(definition), user.rows[0].id]);
+    await db.query('UPDATE automations SET current_version_id=$3 WHERE workspace_id=$1 AND id=$2', [workspaceId, automation.rows[0].id, version.rows[0].id]);
+    const actionRun = await db.query("INSERT INTO automation_runs(workspace_id,automation_id,version_id,lead_id,status,idempotency_key,metadata) VALUES($1,$2,$3,$4,'running',$5,$6::jsonb) RETURNING *", [workspaceId, automation.rows[0].id, version.rows[0].id, lead.rows[0].id, `worker-actions:${lead.rows[0].id}`, JSON.stringify({ requestedBy: user.rows[0].id })]);
+    await worker.runOne({ ...actionRun.rows[0], definition });
+    const updatedLead = await db.query('SELECT status,score,owner_user_id FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceId, lead.rows[0].id]);
+    assert.deepEqual({ status: updatedLead.rows[0].status, score: updatedLead.rows[0].score, owner: updatedLead.rows[0].owner_user_id }, { status: 'Qualified', score: 75, owner: user.rows[0].id });
+    const note = await db.query("SELECT 1 FROM activities WHERE workspace_id=$1 AND lead_id=$2 AND type='note' AND title='Qualified automatically'", [workspaceId, lead.rows[0].id]);
+    assert.equal(note.rowCount, 1);
+    const followUp = await db.query("SELECT 1 FROM tasks WHERE workspace_id=$1 AND lead_id=$2 AND source='automation' AND title='Call qualified lead' AND status='pending'", [workspaceId, lead.rows[0].id]);
+    assert.equal(followUp.rowCount, 1);
   } finally {
     // The migration intentionally makes automation versions append-only; this test uses an ephemeral CI database.
     await db.end();
