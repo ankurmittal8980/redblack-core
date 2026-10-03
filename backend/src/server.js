@@ -566,7 +566,11 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           if (request.method === 'GET' && !action) {
             requirePermission(context, 'crm:read');
             const result = await db.query('SELECT * FROM leads WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL', [workspaceId, leadId]);
-            sendJson(response, 200, result.rows[0]); return;
+            const custom = await db.query(`SELECT d.id, d.field_key, d.label, d.field_type, d.required, d.config, v.value
+              FROM custom_field_definitions d LEFT JOIN lead_custom_fields v ON v.field_definition_id=d.id AND v.lead_id=$2
+              WHERE d.workspace_id=$1 AND d.entity_type='lead' ORDER BY d.created_at`, [workspaceId, leadId]);
+            const tags = await db.query(`SELECT t.id,t.name FROM tags t JOIN lead_tags lt ON lt.tag_id=t.id WHERE t.workspace_id=$1 AND lt.lead_id=$2 ORDER BY t.name`, [workspaceId, leadId]);
+            sendJson(response, 200, { ...result.rows[0], customFields: custom.rows, tags: tags.rows }); return;
           }
           if (request.method === 'GET' && action === 'timeline') {
             requirePermission(context, 'crm:read');
@@ -594,7 +598,8 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             if (input.temperature !== undefined) updates.set('temperature', input.temperature === null ? null : enumValue(input.temperature, 'temperature', ['hot','warm','cold']));
             if (input.nextActionAt !== undefined) updates.set('next_action_at', input.nextActionAt ? isoDate(input.nextActionAt, 'nextActionAt') : null);
             if (input.doNotContact !== undefined) { if (typeof input.doNotContact !== 'boolean') throw new ValidationError('doNotContact must be a boolean.'); updates.set('do_not_contact', input.doNotContact); }
-            if (!updates.size) throw new HttpError(400, 'NO_FIELDS', 'No supported lead fields were provided.');
+            const hasCustomFields = input.customFields && typeof input.customFields === 'object' && !Array.isArray(input.customFields); const hasTags = Array.isArray(input.tagIds);
+            if (!updates.size && !hasCustomFields && !hasTags) throw new HttpError(400, 'NO_FIELDS', 'No supported lead fields were provided.');
             if (updates.has('email_normalized') || updates.has('phone_normalized')) {
               const candidate = await db.query(
                 `SELECT id FROM leads WHERE workspace_id = $1 AND id <> $2 AND deleted_at IS NULL
@@ -605,8 +610,30 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             }
             const values = [workspaceId, leadId]; const assignments = [];
             for (const [column, value] of updates) { values.push(value); assignments.push(`${column} = $${values.length}`); }
-            const result = await db.query(`UPDATE leads SET ${assignments.join(', ')}, updated_at = now() WHERE workspace_id = $1 AND id = $2 RETURNING *`, values);
-            await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.updated', entityType: 'lead', entityId: leadId, request, metadata: { fields: [...updates.keys()] } });
+            let result;
+            if (assignments.length) result = await db.query(`UPDATE leads SET ${assignments.join(', ')}, updated_at = now() WHERE workspace_id = $1 AND id = $2 RETURNING *`, values);
+            else result = await db.query('SELECT * FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceId, leadId]);
+            if (hasCustomFields) {
+              const entries = Object.entries(input.customFields);
+              for (const [fieldId, value] of entries) {
+                const definitionId = uuid(fieldId, 'customFieldId');
+                const definition = await db.query("SELECT id,required FROM custom_field_definitions WHERE workspace_id=$1 AND id=$2 AND entity_type='lead'", [workspaceId, definitionId]);
+                if (!definition.rows[0]) throw new HttpError(400, 'INVALID_CUSTOM_FIELD', 'A custom field does not belong to this workspace.');
+                if (definition.rows[0].required && (value === null || value === '')) throw new ValidationError('Required custom fields cannot be empty.');
+                await db.query(`INSERT INTO lead_custom_fields(lead_id,field_definition_id,value) VALUES($1,$2,$3::jsonb)
+                  ON CONFLICT(lead_id,field_definition_id) DO UPDATE SET value=EXCLUDED.value`, [leadId, definitionId, JSON.stringify(value)]);
+              }
+            }
+            if (hasTags) {
+              const tagIds = [...new Set(input.tagIds.map(value => uuid(value, 'tagId')))];
+              if (tagIds.length) {
+                const valid = await db.query('SELECT id FROM tags WHERE workspace_id=$1 AND id=ANY($2::uuid[])', [workspaceId, tagIds]);
+                if (valid.rows.length !== tagIds.length) throw new HttpError(400, 'INVALID_TAG', 'One or more tags do not belong to this workspace.');
+              }
+              await db.query('DELETE FROM lead_tags WHERE lead_id=$1', [leadId]);
+              for (const tagId of tagIds) await db.query('INSERT INTO lead_tags(lead_id,tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [leadId, tagId]);
+            }
+            await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.updated', entityType: 'lead', entityId: leadId, request, metadata: { fields: [...updates.keys()], customFields: hasCustomFields, tags: hasTags } });
             sendJson(response, 200, result.rows[0]); return;
           }
           if (request.method === 'DELETE' && !action) {
