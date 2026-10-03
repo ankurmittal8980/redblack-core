@@ -543,7 +543,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         if (suffix === 'leads/export' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
           const values = [workspaceId]; let scope = 'l.workspace_id=$1 AND l.deleted_at IS NULL';
-          if (context.role === 'agent') { values.push(current.userId); scope += ` AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=${values.length} AND a.unassigned_at IS NULL)`; }
+          if (context.role === 'agent') { values.push(current.userId); scope += ` AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$2 AND a.unassigned_at IS NULL)`; }
           const result = await db.query(`SELECT l.first_name,l.last_name,l.email,l.phone,l.company_name,l.brand_project,l.opportunity_type,l.budget,l.location,l.status,l.temperature,l.score,l.next_action,l.next_action_at,l.created_at FROM leads l WHERE ${scope} ORDER BY l.created_at DESC LIMIT 10000`, values);
           sendCsv(response, 'redblack-leads.csv', ['First Name','Last Name','Email','Phone','Company','Project','Opportunity Type','Budget','Location','Status','Temperature','Score','Next Action','Next Follow-up','Created'], result.rows.map(row => [row.first_name,row.last_name,row.email,row.phone,row.company_name,row.brand_project,row.opportunity_type,row.budget,row.location,row.status,row.temperature,row.score,row.next_action,row.next_action_at,row.created_at])); return;
         }
