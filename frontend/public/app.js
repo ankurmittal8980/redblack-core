@@ -643,8 +643,7 @@ $('#viewRoot').addEventListener('submit', async event => {
       const tagIds=[...form.querySelectorAll('[data-new-lead-tag]:checked')].map(control=>control.value);
       const lead = { ...input, budget: input.budget ? Number(input.budget) : null, nextActionAt: input.nextActionAt ? localDateTime(input.nextActionAt) : null, temperature: input.temperature || null };
       Object.keys(lead).filter(key=>key.startsWith('cf:')).forEach(key=>delete lead[key]); Object.keys(lead).forEach(key => { if (lead[key] === '') lead[key] = null; });
-      const created=await api(workspacePath('leads'), { method: 'POST', body: lead });
-      if(Object.keys(customFields).length||tagIds.length) await api(`${workspacePath(`leads/${encodeURIComponent(created.id)}`)}`,{method:'PATCH',body:{customFields,tagIds}});
+      await api(workspacePath('leads'), { method: 'POST', body: { ...lead, customFields, tagIds } });
       showToast('Lead created.'); appState.cursor = null; await renderLeads();
     } else if (form.id === 'savedViewForm') {
       await api(workspacePath('saved-views'), { method:'POST', body:{ entityType:'lead', name:input.name, config:{ q:appState.leadSearch||'', status:appState.leadStatus||'' } } });
