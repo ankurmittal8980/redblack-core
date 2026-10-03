@@ -1,9 +1,9 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pool, transaction, closeDatabase } from './db.js';
-import { communications } from './providers.js';
+import { communications, calling } from './providers.js';
 import { CommunicationGateway } from './communication-gateway.js';
-const communicationGateway = new CommunicationGateway({ db: pool, registry: communications });
+const communicationGateway = new CommunicationGateway({ db: pool, registry: communications, callingRegistry: calling });
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
@@ -113,6 +113,9 @@ async function executeAction(run, action, position) {
         [run.workspace_id, run.lead_id, config.channel, config.subject ?? null, config.body, `automation:${run.id}:${position}`, JSON.stringify({ automationRunId: run.id, suppressed: lead.rows[0].do_not_contact })]
       );
       result = { messageId: message.rows[0]?.id ?? null, draftOnly: true, suppressed: lead.rows[0].do_not_contact };
+    } else if (action.type === 'start_call') {
+      const started = await communicationGateway.startCall({ workspaceId: run.workspace_id, leadId: run.lead_id, provider: config.provider, direction: config.direction ?? 'outbound', to: config.to, isAi: config.isAi ?? false, idempotencyKey: `automation:${run.id}:${position}`, metadata: { automationRunId: run.id } });
+      result = { callId: started.call.id, duplicate: started.duplicate };
     } else if (action.type === 'send_communication') {
       const sent = await communicationGateway.send({ workspaceId: run.workspace_id, leadId: run.lead_id, channel: config.channel, provider: config.provider, to: config.to, subject: config.subject, body: config.body, idempotencyKey: `automation:${run.id}:${position}`, metadata: { automationRunId: run.id } });
       result = { messageId: sent.message.id, duplicate: sent.duplicate };
