@@ -209,11 +209,12 @@ async function renderPipelines() {
   if (first) {
     const board = first.stages.map(stage => {
       const matching = cards.filter(({ lead }) => (lead.status || '').toLowerCase() === stage.name.toLowerCase() || (stage.slug === 'new-lead' && (lead.status || '').toLowerCase() === 'new lead'));
-      return `<div class="pipeline-column"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(({ lead }) => `<article class="pipeline-card"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(first.id)}"><option value="">Move to stage…</option>${first.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
+      return `<div class="pipeline-column" data-drop-stage="${escapeHtml(stage.id)}" data-drop-pipeline="${escapeHtml(first.id)}"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(({ lead }) => `<article class="pipeline-card" draggable="true" data-drag-lead="${escapeHtml(lead.id)}"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(first.id)}"><option value="">Move to stage…</option>${first.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
     }).join('');
     setPage(`${pageHeading('OPPORTUNITY FLOW', 'Pipelines', 'Move every opportunity forward with a clear next step.')}
       <section class="panel"><div class="panel-header"><div><h2 class="panel-title">${escapeHtml(first.name)}</h2><p class="panel-subtitle">Showing up to 100 active leads. Stage changes are recorded in history.</p></div><select id="pipelineChoice">${pipelines.data.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === first.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="panel-body"><div class="pipeline-board">${board}</div></div></section>`);
     $('#pipelineChoice').addEventListener('change', () => renderPipelineChoice(pipelines.data, $('#pipelineChoice').value));
+    bindPipelineDnD();
   } else setPage(`${pageHeading('OPPORTUNITY FLOW', 'Pipelines', 'No pipelines are available yet.')}<section class="panel"><div class="empty-state">Ask a workspace admin to create a pipeline.</div></section>`);
 }
 
@@ -223,9 +224,28 @@ async function renderPipelineChoice(all, pipelineId) {
   const leads = await api(`${workspacePath('leads')}?pipelineId=${encodeURIComponent(pipelineId)}&limit=100`);
   const board = pipeline.stages.map(stage => {
     const matching = (leads.data ?? []).filter(lead => (lead.status || '').toLowerCase() === stage.name.toLowerCase() || (stage.slug === 'new-lead' && (lead.status || '').toLowerCase() === 'new lead'));
-    return `<div class="pipeline-column"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(lead => `<article class="pipeline-card"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(pipeline.id)}"><option value="">Move to stage…</option>${pipeline.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
+    return `<div class="pipeline-column" data-drop-stage="${escapeHtml(stage.id)}" data-drop-pipeline="${escapeHtml(pipeline.id)}"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(lead => `<article class="pipeline-card" draggable="true" data-drag-lead="${escapeHtml(lead.id)}"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(pipeline.id)}"><option value="">Move to stage…</option>${pipeline.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
   }).join('');
   $('.pipeline-board').innerHTML = board;
+  bindPipelineDnD();
+}
+
+function bindPipelineDnD() {
+  document.querySelectorAll('[data-drag-lead]').forEach(card => card.addEventListener('dragstart', event => {
+    event.dataTransfer.setData('text/plain', card.dataset.dragLead);
+    event.dataTransfer.effectAllowed = 'move';
+  }));
+  document.querySelectorAll('[data-drop-stage]').forEach(column => {
+    column.addEventListener('dragover', event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; });
+    column.addEventListener('drop', async event => {
+      event.preventDefault(); const leadId = event.dataTransfer.getData('text/plain');
+      if (!leadId) return;
+      try {
+        await api(`${workspacePath(`leads/${encodeURIComponent(leadId)}/stage`)}`, { method: 'POST', body: { pipelineId: column.dataset.dropPipeline, stageId: column.dataset.dropStage } });
+        showToast('Lead moved.'); await renderPipelines();
+      } catch (error) { showToast(error.message, 'error'); }
+    });
+  });
 }
 
 async function renderTasks() {
