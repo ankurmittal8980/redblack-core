@@ -1,6 +1,14 @@
 const $ = selector => document.querySelector(selector);
 const appState = { user: null, workspace: null, workspaces: [], role: null, view: 'dashboard', cursor: null, leadSearch: '', leadStatus: '', selectedLeads: new Set(), toastTimer: null };
 const apiRoot = '/api/v1';
+const VIEW_ROLES = Object.freeze({
+  automations: ['owner','admin','manager'],
+  usage: ['owner','admin','manager','reporting'],
+  reports: ['owner','admin','manager','reporting'],
+  workspace: ['owner','admin']
+});
+
+function viewAllowed(view, role) { return !VIEW_ROLES[view] || VIEW_ROLES[view].includes(role); }
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -69,6 +77,8 @@ function switchToApp(session) {
   appState.user = session.user;
   appState.workspace = session.workspace;
   appState.role = session.role;
+  document.querySelectorAll('#mainNav [data-view]').forEach(button => button.classList.toggle('hidden', !viewAllowed(button.dataset.view, appState.role)));
+  if (!viewAllowed(appState.view, appState.role)) appState.view = 'dashboard';
   $('#authView').classList.add('hidden');
   $('#appView').classList.remove('hidden');
   $('#userLabel').textContent = session.user.displayName ?? session.user.email;
@@ -440,6 +450,7 @@ async function renderWorkspace() {
 }
 
 async function renderView(view) {
+  if (!viewAllowed(view, appState.role)) view = 'dashboard';
   appState.view = view;
   document.querySelectorAll('.nav-item').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   try {
