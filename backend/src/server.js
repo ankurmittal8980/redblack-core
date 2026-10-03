@@ -851,19 +851,38 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             [workspaceId, pipelineId, name, stageSlug, position, booleanInput(input.isWon, 'isWon'), booleanInput(input.isLost, 'isLost')]
           );
           if (!result.rows[0]) throw new HttpError(404, 'PIPELINE_NOT_FOUND', 'Pipeline was not found.');
+          await audit(db, { workspaceId, actorUserId: current.userId, action: 'pipeline.stage_created', entityType: 'pipeline_stage', entityId: result.rows[0].id, request, metadata: { pipelineId } });
           sendJson(response, 201, result.rows[0]); return;
         }
         if (pipelineMatch && request.method === 'PATCH' && /^stages\//.test(pipelineMatch[2] ?? '')) {
           requirePermission(context, 'workspace:manage'); const pipelineId = uuid(pipelineMatch[1], 'pipelineId'); const stageId = uuid(pipelineMatch[2].slice('stages/'.length), 'stageId'); const input = await body();
           const fields = []; const values = [pipelineId, stageId, workspaceId];
-          if (input.name !== undefined) { values.push(requiredString(input.name, 'name', { max: 120 })); fields.push(`name=$${values.length}`); }
-          if (input.slug !== undefined) { values.push(slug(input.slug)); fields.push(`slug=$${values.length}`); }
-          if (input.position !== undefined) { values.push(Math.trunc(finiteNumber(input.position, 'position', { min: 0, max: 10000 }))); fields.push(`position=$${values.length}`); }
-          if (input.isWon !== undefined) { if (typeof input.isWon !== 'boolean') throw new ValidationError('isWon must be a boolean.'); values.push(input.isWon); fields.push(`is_won=$${values.length}`); }
-          if (input.isLost !== undefined) { if (typeof input.isLost !== 'boolean') throw new ValidationError('isLost must be a boolean.'); values.push(input.isLost); fields.push(`is_lost=$${values.length}`); }
+          let requestedPosition = null;
+          if (input.name !== undefined) { values.push(requiredString(input.name, 'name', { max: 120 })); fields.push(`name=${values.length}`); }
+          if (input.slug !== undefined) { values.push(slug(input.slug)); fields.push(`slug=${values.length}`); }
+          if (input.position !== undefined) { requestedPosition = Math.trunc(finiteNumber(input.position, 'position', { min: 0, max: 10000 })); values.push(requestedPosition); fields.push(`position=${values.length}`); }
+          if (input.isWon !== undefined) { if (typeof input.isWon !== 'boolean') throw new ValidationError('isWon must be a boolean.'); values.push(input.isWon); fields.push(`is_won=${values.length}`); }
+          if (input.isLost !== undefined) { if (typeof input.isLost !== 'boolean') throw new ValidationError('isLost must be a boolean.'); values.push(input.isLost); fields.push(`is_lost=${values.length}`); }
           if (!fields.length) throw new HttpError(400, 'NO_FIELDS', 'Provide stage fields.');
-          const result = await db.query(`UPDATE pipeline_stages s SET ${fields.join(', ')} FROM pipelines p WHERE s.pipeline_id=$1 AND s.id=$2 AND p.workspace_id=$3 AND p.id=s.pipeline_id RETURNING s.id,s.name,s.slug,s.position,s.is_won,s.is_lost`, values);
-          if (!result.rows[0]) throw new HttpError(404, 'STAGE_NOT_FOUND', 'Stage was not found.'); sendJson(response, 200, result.rows[0]); return;
+          const updateStage = async client => {
+            if (requestedPosition !== null) {
+              const currentStage = await client.query('SELECT s.position FROM pipeline_stages s JOIN pipelines p ON p.id=s.pipeline_id WHERE p.workspace_id=$1 AND p.id=$2 AND s.id=$3 FOR UPDATE', [workspaceId, pipelineId, stageId]);
+              if (!currentStage.rows[0]) throw new HttpError(404, 'STAGE_NOT_FOUND', 'Stage was not found.');
+              const priorPosition = Number(currentStage.rows[0].position);
+              if (priorPosition !== requestedPosition) {
+                const temporary = await client.query('SELECT COALESCE(MIN(position),0)-1 AS position FROM pipeline_stages WHERE pipeline_id=$1', [pipelineId]);
+                const temporaryPosition = Number(temporary.rows[0].position);
+                await client.query('UPDATE pipeline_stages SET position=$3 WHERE pipeline_id=$1 AND id=$2', [pipelineId, stageId, temporaryPosition]);
+                await client.query('UPDATE pipeline_stages SET position=$3 WHERE pipeline_id=$1 AND position=$2 AND id<>$4', [pipelineId, requestedPosition, priorPosition, stageId]);
+              }
+            }
+            const result = await client.query(`UPDATE pipeline_stages s SET ${fields.join(', ')} FROM pipelines p WHERE s.pipeline_id=$1 AND s.id=$2 AND p.workspace_id=$3 AND p.id=s.pipeline_id RETURNING s.id,s.name,s.slug,s.position,s.is_won,s.is_lost`, values);
+            if (!result.rows[0]) throw new HttpError(404, 'STAGE_NOT_FOUND', 'Stage was not found.');
+            await audit(client, { workspaceId, actorUserId: current.userId, action: 'pipeline.stage_updated', entityType: 'pipeline_stage', entityId: stageId, request, metadata: { pipelineId, fields: fields.map(item => item.split('=')[0]) } });
+            return result.rows[0];
+          };
+          const updated = requestedPosition === null ? await updateStage(db) : await transaction(db, updateStage);
+          sendJson(response, 200, updated); return;
         }
         if (suffix === 'custom-fields' && request.method === 'GET') {
           requirePermission(context, 'crm:read'); const result = await db.query('SELECT id, entity_type, field_key, label, field_type, required, config, created_at FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type=$2 ORDER BY created_at', [workspaceId, url.searchParams.get('entityType') ?? 'lead']); sendJson(response, 200, { data: result.rows }); return;
