@@ -69,3 +69,21 @@ test('automation conditions support nested all-any comparisons', () => {
   assert.match(server, /Array\.isArray\(node\.any\)/);
   assert.match(server, /operator === '>='/);
 });
+
+
+test('configurable CRM rules and safe destructive controls are wired', () => {
+  assert.match(server, /crm_assignment_rules/);
+  assert.match(server, /crm_scoring_rules/);
+  assert.match(server, /applyLeadRules/);
+  assert.match(server, /lead\.permanently_deleted/);
+  assert.match(app, /assignmentRuleForm/);
+  assert.match(app, /scoringRuleForm/);
+  assert.match(app, /purge-lead/);
+});
+
+test('bulk CRM actions cover owner stage and tags', () => {
+  assert.match(server, /'stage','tags'/);
+  assert.match(app, /bulkStage/);
+  assert.match(app, /bulkTag/);
+  assert.match(app, /bulkOwner/);
+});
