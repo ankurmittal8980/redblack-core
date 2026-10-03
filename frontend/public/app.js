@@ -212,11 +212,37 @@ async function renderPipelineChoice(all, pipelineId) {
 
 async function renderTasks() {
   const result = await api(`${workspacePath('tasks')}?limit=100`);
-  const rows = (result.data ?? []).map(task => `<tr><td><div class="lead-name">${escapeHtml(task.title)}</div><div class="lead-sub">${escapeHtml(task.task_type || task.source || 'Follow-up')}</div></td><td>${fmtDate(task.due_at, { time: true })}</td><td>${badge(task.status)}</td><td>${escapeHtml(task.priority)}</td><td>${task.status === 'completed' || task.status === 'cancelled' ? '—' : `<button class="quiet-button" data-action="complete-task" data-id="${escapeHtml(task.id)}">Complete</button>`}</td></tr>`).join('') || '<tr><td colspan="5" class="empty-state">No tasks found.</td></tr>';
+  appState.taskCache = result.data ?? [];
+  const rows = appState.taskCache.map(task => {
+    const terminal = ['completed','cancelled'].includes(task.status);
+    const actions = terminal
+      ? `<button class="quiet-button" data-action="task-status" data-status="pending" data-id="${escapeHtml(task.id)}">Reopen</button>`
+      : `<button class="quiet-button" data-action="complete-task" data-id="${escapeHtml(task.id)}">Complete</button> <button class="quiet-button" data-action="task-status" data-status="cancelled" data-id="${escapeHtml(task.id)}">Cancel</button>`;
+    return `<tr><td><div class="lead-name">${escapeHtml(task.title)}</div><div class="lead-sub">${escapeHtml(task.task_type || task.source || 'Follow-up')}</div></td><td>${fmtDate(task.due_at, { time: true })}</td><td>${badge(task.status)}</td><td>${escapeHtml(task.priority)}</td><td><button class="quiet-button" data-action="edit-task" data-id="${escapeHtml(task.id)}">Edit</button> ${actions}</td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="empty-state">No tasks found.</td></tr>';
   const canWrite = ['owner','admin','manager','agent'].includes(appState.role);
-  setPage(`${pageHeading('FOLLOW-UP WORK', 'Tasks & activities', 'Keep next actions visible and close the loop with every lead.', canWrite ? '<button class="button button-primary" data-action="toggle-task-form">+ New task</button>' : '')}
+  setPage(`${pageHeading('FOLLOW-UP WORK', 'Tasks & activities', 'Create, edit, complete, cancel and reopen follow-ups.', canWrite ? '<button class="button button-primary" data-action="toggle-task-form">+ New task</button>' : '')}
     <section id="taskFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Create a follow-up</h2><button class="text-button" data-action="toggle-task-form">Close</button></div><form id="taskForm" class="panel-body"><div class="field-grid"><label>Lead ID (optional)<input name="leadId" maxlength="36"></label><label>Task type<select name="taskType"><option>CALL</option><option>WHATSAPP</option><option>MEETING</option><option>EMAIL</option><option>OTHER</option></select></label><label class="span-2">Title<input name="title" required maxlength="240"></label><label>Due date<input name="dueAt" type="datetime-local"></label><label>Priority<input name="priority" type="number" value="0" min="0" max="10"></label><label class="span-2">Notes<textarea name="description" maxlength="5000"></textarea></label></div><button class="button button-primary">Save task</button></form></section>
-    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Task queue</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} records</p></div></div><div class="table-wrap"><table><thead><tr><th>Task</th><th>Due</th><th>Status</th><th>Priority</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
+    <section id="taskEditPanel" class="panel hidden"></section>
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Task queue</h2><p class="panel-subtitle">${fmtNumber(appState.taskCache.length)} records</p></div></div><div class="table-wrap"><table><thead><tr><th>Task</th><th>Due</th><th>Status</th><th>Priority</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
+}
+
+function openTaskEditor(taskId) {
+  const task = (appState.taskCache ?? []).find(item => item.id === taskId);
+  if (!task) return;
+  const panel = $('#taskEditPanel');
+  const due = task.due_at ? new Date(task.due_at).toISOString().slice(0,16) : '';
+  panel.innerHTML = `<div class="panel-header"><h2 class="panel-title">Edit task</h2><button class="text-button" data-action="close-task-edit">Close</button></div><form id="taskEditForm" data-task-id="${escapeHtml(task.id)}" class="panel-body"><div class="field-grid"><label class="span-2">Title<input name="title" value="${escapeHtml(task.title)}" required maxlength="240"></label><label>Due date<input name="dueAt" type="datetime-local" value="${escapeHtml(due)}"></label><label>Priority<input name="priority" type="number" min="0" max="10" value="${escapeHtml(task.priority ?? 0)}"></label><label>Status<select name="status">${['pending','in_progress','completed','cancelled'].map(value => `<option value="${value}" ${task.status === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label class="span-2">Notes<textarea name="description" maxlength="5000">${escapeHtml(task.description || '')}</textarea></label></div><button class="button button-primary">Save task</button></form>`;
+  panel.classList.remove('hidden');
+}
+
+async function renderMeetings() {
+  const [meetings, leads] = await Promise.all([api(`${workspacePath('meetings')}?limit=100`), api(`${workspacePath('leads')}?limit=100`)]);
+  const canWrite = ['owner','admin','manager','agent'].includes(appState.role);
+  const rows = (meetings.data ?? []).map(item => `<tr><td>${fmtDate(item.starts_at, { time: true })}</td><td>${escapeHtml(item.meeting_type || 'Meeting')}</td><td>${badge(item.status)}</td><td>${escapeHtml(item.notes || '—')}</td><td>${canWrite ? `<button class="quiet-button" data-action="meeting-status" data-status="completed" data-id="${escapeHtml(item.id)}">Complete</button> <button class="quiet-button" data-action="meeting-status" data-status="missed" data-id="${escapeHtml(item.id)}">Missed</button> <button class="quiet-button" data-action="meeting-status" data-status="cancelled" data-id="${escapeHtml(item.id)}">Cancel</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty-state">No meetings scheduled.</td></tr>';
+  setPage(`${pageHeading('APPOINTMENTS', 'Meetings & calendar', 'Schedule appointments and record completed, missed or cancelled outcomes.')}
+    ${canWrite ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Schedule meeting</h2></div><form id="meetingForm" class="panel-body"><div class="field-grid"><label>Lead<select name="leadId"><option value="">No linked lead</option>${(leads.data ?? []).map(lead => `<option value="${escapeHtml(lead.id)}">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || lead.email || lead.phone || lead.id)}</option>`).join('')}</select></label><label>Type<input name="meetingType" value="Consultation" maxlength="120"></label><label>Starts<input name="startsAt" type="datetime-local" required></label><label>Ends<input name="endsAt" type="datetime-local"></label><label class="span-2">Notes<textarea name="notes" maxlength="5000"></textarea></label></div><button class="button button-primary">Schedule meeting</button></form></section>` : ''}
+    <section class="panel"><div class="panel-header"><h2 class="panel-title">Calendar queue</h2><span class="badge">${fmtNumber(meetings.data?.length ?? 0)}</span></div><div class="table-wrap"><table><thead><tr><th>When</th><th>Type</th><th>Status</th><th>Notes</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
 }
 
 async function renderCommunications() {
@@ -290,6 +316,7 @@ async function renderView(view) {
     else if (view === 'trash') await renderTrash();
     else if (view === 'pipelines') await renderPipelines();
     else if (view === 'tasks') await renderTasks();
+    else if (view === 'meetings') await renderMeetings();
     else if (view === 'communications') await renderCommunications();
     else if (view === 'calling') await renderCalling();
     else if (view === 'automations') await renderAutomations();
@@ -374,6 +401,10 @@ $('#viewRoot').addEventListener('click', async event => {
     else if (action === 'next-leads') { appState.cursor = button.dataset.cursor; await renderLeads(); }
     else if (action === 'clear-lead-filters') { appState.cursor = null; appState.leadSearch = ''; appState.leadStatus = ''; appState.selectedLeads.clear(); await renderLeads(); }
     else if (action === 'toggle-task-form') $('#taskFormPanel').classList.toggle('hidden');
+    else if (action === 'edit-task') openTaskEditor(id);
+    else if (action === 'close-task-edit') $('#taskEditPanel')?.classList.add('hidden');
+    else if (action === 'task-status') { await api(`${workspacePath(`tasks/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: button.dataset.status } }); showToast('Task status updated.'); await renderTasks(); }
+    else if (action === 'meeting-status') { await api(`${workspacePath(`meetings/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: button.dataset.status } }); showToast('Meeting updated.'); await renderMeetings(); }
     else if (action === 'toggle-automation-form') $('#automationFormPanel').classList.toggle('hidden');
     else if (action === 'reload-view') await renderView(appState.view);
     else if (action === 'run-automation') {
@@ -421,6 +452,13 @@ $('#viewRoot').addEventListener('submit', async event => {
     } else if (form.id === 'taskForm') {
       const task = { ...input, leadId: input.leadId || null, dueAt: input.dueAt ? localDateTime(input.dueAt) : null, priority: Number(input.priority ?? 0) };
       await api(workspacePath('tasks'), { method: 'POST', body: task }); showToast('Follow-up created.'); await renderTasks();
+    } else if (form.id === 'taskEditForm') {
+      const taskId = form.dataset.taskId;
+      await api(`${workspacePath(`tasks/${encodeURIComponent(taskId)}`)}`, { method: 'PATCH', body: { title: input.title, description: input.description || null, dueAt: input.dueAt ? localDateTime(input.dueAt) : null, priority: Number(input.priority || 0), status: input.status } });
+      showToast('Task updated.'); await renderTasks();
+    } else if (form.id === 'meetingForm') {
+      await api(workspacePath('meetings'), { method: 'POST', body: { leadId: input.leadId || null, meetingType: input.meetingType || null, startsAt: localDateTime(input.startsAt), endsAt: input.endsAt ? localDateTime(input.endsAt) : null, status: 'scheduled', notes: input.notes || null } });
+      showToast('Meeting scheduled.'); await renderMeetings();
     } else if (form.id === 'messageDraftForm') {
       await api(workspacePath('messages'), { method: 'POST', body: input }); showToast('Message draft saved.'); await renderCommunications();
     } else if (form.id === 'callForm') {
