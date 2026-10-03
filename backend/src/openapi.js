@@ -20,6 +20,8 @@ export const OPENAPI_SPEC = Object.freeze({
     '/api/v1/auth/me': { get: { tags: ['Authentication'], summary: 'Current identity and workspace', security: [{ cookieSession: [] }], responses: { '200': { description: 'Current identity' } } } },
     '/api/v1/workspaces': { get: { tags: ['Workspace'], summary: 'List accessible workspaces', security: [{ cookieSession: [] }], responses: { '200': { description: 'Workspace memberships' } } }, post: protectedWrite('Create a workspace') },
     [`${workspace}/leads`]: { ...protectedGet('List workspace leads'), ...protectedWrite('Create a lead') },
+    [`${workspace}/leads/import`]: protectedWrite('Import leads from CSV text'),
+    [`${workspace}/leads/export`]: protectedGet('Export visible leads as CSV'),
     [`${workspace}/leads/trash`]: protectedGet('List trashed leads'),
     [`${workspace}/leads/bulk`]: protectedWrite('Bulk trash, restore, status or owner update'),
     [`${workspace}/leads/{leadId}/restore`]: protectedWrite('Restore a trashed lead'),
