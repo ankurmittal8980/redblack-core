@@ -1010,9 +1010,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         if (suffix === 'meetings' && request.method === 'GET') {
           requirePermission(context, 'crm:read'); const values = [workspaceId]; let filter = 'workspace_id = $1';
-          if (context.role === 'agent') { values.push(current.userId); filter += ` AND owner_user_id = ${values.length}`; }
-          if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filter += ` AND lead_id = ${values.length}`; }
-          values.push(pageSize(url)); const result = await db.query(`SELECT * FROM meetings WHERE ${filter} ORDER BY starts_at DESC LIMIT ${values.length}`, values);
+          if (context.role === 'agent') { values.push(current.userId); filter += ` AND owner_user_id = $${values.length}`; }
+          if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filter += ` AND lead_id = $${values.length}`; }
+          values.push(pageSize(url)); const result = await db.query(`SELECT * FROM meetings WHERE ${filter} ORDER BY starts_at DESC LIMIT $${values.length}`, values);
           sendJson(response, 200, { data: result.rows }); return;
         }
         if (suffix === 'meetings' && request.method === 'POST') {
