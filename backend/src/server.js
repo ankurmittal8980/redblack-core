@@ -24,7 +24,7 @@ const CHANNELS = ['email', 'whatsapp', 'rcs', 'voice'];
 const CALL_DIRECTIONS = ['inbound', 'outbound'];
 const CALL_STATUSES = ['queued', 'ringing', 'answered', 'missed', 'busy', 'failed', 'cancelled'];
 const ACTIVITY_TYPES = ['call', 'email', 'whatsapp', 'rcs', 'meeting', 'note', 'status_change', 'system'];
-const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft', 'wait'];
+const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft', 'wait', 'create_lead', 'update_lead', 'assign_owner', 'create_note', 'invoke_ai', 'call_webhook', 'notify_user', 'book_appointment', 'schedule_follow_up', 'send_communication'];
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'], ['.css', 'text/css; charset=utf-8'], ['.js', 'text/javascript; charset=utf-8'],
   ['.svg', 'image/svg+xml'], ['.png', 'image/png'], ['.ico', 'image/x-icon']
@@ -1211,7 +1211,7 @@ export function normalizeAutomation(input) {
   return {
     name: requiredString(input.name, 'name', { max: 160 }),
     description: optionalString(input.description, 'description', 5000),
-    triggerType: enumValue(input.triggerType, 'triggerType', ['manual', 'lead.created', 'lead.stage_changed', 'task.completed', 'meeting.created', 'meeting.missed', 'call.ended', 'lead.no_response']),
+    triggerType: enumValue(input.triggerType, 'triggerType', ['manual', 'lead.created', 'lead.updated', 'form.submitted', 'lead.stage_changed', 'message.incoming', 'email.incoming', 'appointment.created', 'appointment.missed', 'task.completed', 'meeting.created', 'meeting.missed', 'call.completed', 'call.ended', 'lead.no_response', 'lead.score_changed', 'scheduled.time', 'webhook.received', 'ai.decision']),
     triggerConfig: objectBody(input.triggerConfig ?? {}),
     actions: actions.map((action, position) => {
       objectBody(action);
@@ -1219,6 +1219,16 @@ export function normalizeAutomation(input) {
       const config = objectBody(action.config ?? {});
       if (type === 'create_task') return { type, config: { title: requiredString(config.title, 'title', { max: 240 }), description: optionalString(config.description, 'description', 5000), dueInMinutes: Math.trunc(finiteNumber(config.dueInMinutes ?? 0, 'dueInMinutes', { min: 0, max: 525600 })), assignTo: config.assignTo ? enumValue(config.assignTo, 'assignTo', ['owner', 'current']) : 'owner' } };
       if (type === 'create_activity') return { type, config: { title: requiredString(config.title, 'title', { max: 240 }), body: optionalString(config.body, 'body', 5000) } };
+      if (type === 'create_lead') return { type, config: { firstName: optionalString(config.firstName, 'firstName', 120), lastName: optionalString(config.lastName, 'lastName', 120), email: optionalString(config.email, 'email', 320), phone: optionalString(config.phone, 'phone', 80), status: optionalString(config.status, 'status', 80) } };
+      if (type === 'update_lead') return { type, config: objectBody(config) };
+      if (type === 'assign_owner') return { type, config: { userId: config.userId ? uuid(config.userId, 'userId') : null } };
+      if (type === 'create_note') return { type, config: { title: requiredString(config.title, 'title', { max: 240 }), body: optionalString(config.body, 'body', 5000) } };
+      if (type === 'schedule_follow_up') return { type, config: { title: requiredString(config.title, 'title', { max: 240 }), dueInMinutes: Math.trunc(finiteNumber(config.dueInMinutes ?? 60, 'dueInMinutes', { min: 0, max: 525600 })) } };
+      if (type === 'notify_user') return { type, config: { userId: config.userId ? uuid(config.userId, 'userId') : null, message: requiredString(config.message, 'message', { max: 5000 }) } };
+      if (type === 'invoke_ai') return { type, config: objectBody(config) };
+      if (type === 'call_webhook') return { type, config: { url: requiredString(config.url, 'url', { max: 2000 }), method: optionalString(config.method, 'method', 10) ?? 'POST' } };
+      if (type === 'send_communication') return { type, config: objectBody(config) };
+      if (type === 'book_appointment') return { type, config: objectBody(config) };
       if (type === 'change_stage') return { type, config: { pipelineId: uuid(config.pipelineId, 'pipelineId'), stageId: uuid(config.stageId, 'stageId') } };
       if (type === 'wait') return { type, config: { minutes: Math.trunc(finiteNumber(config.minutes, 'minutes', { min: 1, max: 525600 })) } };
       return { type, config: { channel: enumValue(config.channel, 'channel', CHANNELS), subject: optionalString(config.subject, 'subject', 500), body: requiredString(config.body, 'body', { max: 10000 }) } };
