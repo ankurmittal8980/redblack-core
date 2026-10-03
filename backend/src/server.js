@@ -24,7 +24,7 @@ const CHANNELS = ['email', 'whatsapp', 'rcs', 'voice'];
 const CALL_DIRECTIONS = ['inbound', 'outbound'];
 const CALL_STATUSES = ['queued', 'ringing', 'answered', 'missed', 'busy', 'failed', 'cancelled'];
 const ACTIVITY_TYPES = ['call', 'email', 'whatsapp', 'rcs', 'meeting', 'note', 'status_change', 'system'];
-const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft', 'wait', 'create_lead', 'update_lead', 'assign_owner', 'create_note', 'invoke_ai', 'call_webhook', 'notify_user', 'book_appointment', 'schedule_follow_up', 'send_communication'];
+const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft', 'wait', 'create_lead', 'update_lead', 'assign_owner', 'create_note', 'invoke_ai', 'call_webhook', 'notify_user', 'book_appointment', 'schedule_follow_up', 'send_communication', 'start_call'];
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'], ['.css', 'text/css; charset=utf-8'], ['.js', 'text/javascript; charset=utf-8'],
   ['.svg', 'image/svg+xml'], ['.png', 'image/png'], ['.ico', 'image/x-icon']
@@ -1228,6 +1228,7 @@ export function normalizeAutomation(input) {
       if (type === 'invoke_ai') return { type, config: objectBody(config) };
       if (type === 'call_webhook') return { type, config: { url: requiredString(config.url, 'url', { max: 2000 }), method: optionalString(config.method, 'method', 10) ?? 'POST' } };
       if (type === 'send_communication') return { type, config: objectBody(config) };
+      if (type === 'start_call') return { type, config: { provider: requiredString(config.provider, 'provider', { max: 80 }), direction: config.direction ? enumValue(config.direction, 'direction', ['inbound', 'outbound']) : 'outbound', to: requiredString(config.to, 'to', { max: 240 }), isAi: Boolean(config.isAi) } };
       if (type === 'book_appointment') return { type, config: objectBody(config) };
       if (type === 'change_stage') return { type, config: { pipelineId: uuid(config.pipelineId, 'pipelineId'), stageId: uuid(config.stageId, 'stageId') } };
       if (type === 'wait') return { type, config: { minutes: Math.trunc(finiteNumber(config.minutes, 'minutes', { min: 1, max: 525600 })) } };

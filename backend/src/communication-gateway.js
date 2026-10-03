@@ -3,11 +3,17 @@ import { ProviderUnavailableError } from './providers.js';
 
 const CHANNELS = new Set(['email', 'sms', 'whatsapp']);
 const STATUS_ORDER = { queued: 0, received: 1, sent: 1, delivered: 2, read: 3, failed: 99 };
+const CALL_STATUSES = new Set(['queued','ringing','answered','missed','busy','failed','cancelled']);
 function assertChannel(channel) { if (!CHANNELS.has(channel)) throw Object.assign(new Error('Unsupported communication channel.'), { code: 'CHANNEL_UNSUPPORTED', status: 400 }); }
 function consentDenied() { return Object.assign(new Error('Lead has opted out of communications.'), { code: 'COMMUNICATION_CONSENT_REQUIRED', status: 403 }); }
 
 export class CommunicationGateway {
-  constructor({ db, registry, clock = () => new Date() }) { this.db = db; this.registry = registry; this.clock = clock; }
+  constructor({ db, registry, callingRegistry = null, clock = () => new Date() }) { this.db = db; this.registry = registry; this.calling = callingRegistry; this.clock = clock; }
+  async leadAllowed(workspaceId, leadId) {
+    const lead = await this.db.query('SELECT do_not_contact, consent FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
+    if (!lead.rows[0]) throw Object.assign(new Error('Lead was not found in this workspace.'), { code: 'LEAD_NOT_FOUND', status: 404 });
+    if (lead.rows[0].do_not_contact || lead.rows[0].consent === false) throw Object.assign(new Error('Lead has opted out of communications.'), { code: 'COMMUNICATION_CONSENT_REQUIRED', status: 403 });
+  }
   async send({ workspaceId, leadId, channel, provider, to, subject = null, body, idempotencyKey = randomUUID(), metadata = {} }) {
     assertChannel(channel);
     const lead = await this.db.query('SELECT do_not_contact, consent FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
@@ -40,6 +46,28 @@ export class CommunicationGateway {
     if (STATUS_ORDER[status] < STATUS_ORDER[prior.rows[0].status] && status !== 'failed') return prior.rows[0];
     const updated = await this.db.query(`UPDATE messages SET status=$3, delivered_at=CASE WHEN $3 IN ('delivered','read') THEN COALESCE(delivered_at,now()) ELSE delivered_at END, metadata=metadata || $4::jsonb WHERE workspace_id=$1 AND provider_message_id=$2 RETURNING *`, [workspaceId, providerMessageId, status, JSON.stringify(metadata)]);
     return updated.rows[0];
+  }
+  async startCall({ workspaceId, leadId, provider, direction, to, idempotencyKey = randomUUID(), isAi = false, metadata = {} }) {
+    if (!['inbound','outbound'].includes(direction)) throw Object.assign(new Error('Call direction is invalid.'), { code: 'CALL_DIRECTION_INVALID', status: 400 });
+    await this.leadAllowed(workspaceId, leadId);
+    const prior = await this.db.query('SELECT * FROM calls WHERE workspace_id=$1 AND idempotency_key=$2', [workspaceId, idempotencyKey]);
+    if (prior.rows[0]) return { call: prior.rows[0], duplicate: true };
+    const adapter = this.calling?.get(provider); if (!adapter) throw new ProviderUnavailableError('voice');
+    const result = await adapter.startCall({ workspaceId, leadId, direction, to, isAi, metadata });
+    const inserted = await this.db.query(`INSERT INTO calls(workspace_id,lead_id,provider,provider_call_id,direction,status,is_ai,metadata,idempotency_key)
+      VALUES($1,$2,$3,$4,$5,'queued',$6,$7::jsonb,$8) RETURNING *`, [workspaceId, leadId, provider, result.providerCallId ?? null, direction, isAi, JSON.stringify(metadata), idempotencyKey]);
+    await this.db.query(`INSERT INTO usage_events(workspace_id,provider,service,usage_type,quantity,unit,external_reference,idempotency_key,metadata)
+      VALUES($1,$2,'voice','call',1,'call',$3,$4,$5::jsonb) ON CONFLICT DO NOTHING`, [workspaceId, provider, `call:${inserted.rows[0].id}`, `call:${inserted.rows[0].id}`, JSON.stringify({ isAi })]);
+    return { call: inserted.rows[0], duplicate: false };
+  }
+  async ingestCallEvent({ workspaceId, provider, eventId, providerCallId, status, recordingRef, transcript, metadata = {} }) {
+    if (!CALL_STATUSES.has(status)) throw Object.assign(new Error('Call status is invalid.'), { code: 'CALL_STATUS_INVALID', status: 400 });
+    const receipt = await this.db.query('INSERT INTO webhook_receipts(provider,event_id) VALUES($1,$2) ON CONFLICT DO NOTHING RETURNING id', [provider, eventId]);
+    if (!receipt.rows[0]) return { duplicate: true };
+    const call = await this.db.query(`UPDATE calls SET status=$3, recording_ref=COALESCE($4,recording_ref), metadata=metadata || $5::jsonb WHERE workspace_id=$1 AND provider_call_id=$2 RETURNING *`, [workspaceId, providerCallId, status, recordingRef ?? null, JSON.stringify(metadata)]);
+    if (!call.rows[0]) throw Object.assign(new Error('Call was not found in this workspace.'), { code: 'CALL_NOT_FOUND', status: 404 });
+    if (transcript) await this.db.query('INSERT INTO call_transcripts(workspace_id,call_id,transcript,metadata) VALUES($1,$2,$3,$4::jsonb)', [workspaceId, call.rows[0].id, transcript, JSON.stringify(metadata)]);
+    return { duplicate: false, call: call.rows[0] };
   }
 }
 export { assertChannel, consentDenied };
