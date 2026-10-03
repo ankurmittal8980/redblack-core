@@ -40,8 +40,8 @@ test('CRM daily workspace and builder contracts are present', () => {
   assert.match(app, /data-automation-step/);
   assert.match(app, /dragstart/);
   assert.match(app, /automation-runs/);
-  assert.match(server, /operation === 'status'/);
-  assert.match(server, /operation === 'owner'/);
+  assert.match(server, /operation\s*===\s*'status'/);
+  assert.match(server, /operation\s*===\s*'owner'/);
 });
 
 
