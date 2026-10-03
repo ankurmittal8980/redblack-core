@@ -332,7 +332,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         const created = await createSession(db, { userId: user.id, workspaceId: selected?.id ?? null });
         setSessionCookies(response, created.token, created.csrf, created.expiresAt);
         sendJson(response, selected ? 200 : 409, {
-          user: publicUser(user), workspace: selected,
+          user: publicUser(user), role: selected?.role ?? null, workspace: selected,
           workspaces: selected ? undefined : memberships.rows,
           code: selected ? undefined : 'WORKSPACE_SELECTION_REQUIRED'
         }); return;
