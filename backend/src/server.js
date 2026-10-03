@@ -1195,6 +1195,11 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         const automationMatch = suffix.match(/^automations\/([^/]+)(?:\/(.*))?$/);
         if (automationMatch) {
           requirePermission(context, 'automation:manage'); const automationId = uuid(automationMatch[1], 'automationId'); const action = automationMatch[2] ?? '';
+          if (request.method === 'GET' && !action) {
+            const result = await db.query(`SELECT a.*,v.version_number,v.definition FROM automations a LEFT JOIN automation_versions v ON v.id=a.current_version_id AND v.workspace_id=a.workspace_id WHERE a.workspace_id=$1 AND a.id=$2`,[workspaceId,automationId]);
+            if(!result.rows[0])throw new HttpError(404,'AUTOMATION_NOT_FOUND','Automation was not found.');
+            sendJson(response,200,result.rows[0]);return;
+          }
           if (request.method === 'PATCH' && !action) {
             const input = await body(); const definition = normalizeAutomation(input);
             const updated = await transaction(db, async client => {
