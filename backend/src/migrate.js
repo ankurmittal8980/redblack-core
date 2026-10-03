@@ -43,7 +43,10 @@ export async function applyMigrations(db = pool) {
   }
 }
 
-const invokedAsScript = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+// migrate.js is the dedicated migration executable used by Docker and package scripts.
+// Execute whenever this module is launched as the process entrypoint. Tests import
+// applyMigrations() through a query-string module URL, so imports remain side-effect free.
+const invokedAsScript = Boolean(process.argv[1]) && import.meta.url === new URL(`file://${path.resolve(process.argv[1]).replaceAll('\\\\', '/')}`).href;
 
 if (invokedAsScript) {
   try {
