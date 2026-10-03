@@ -948,6 +948,27 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           }
         }
 
+        if (suffix === 'control-center' && request.method === 'GET') {
+          requirePermission(context, 'crm:read');
+          const [usage, providers, automations, calls, settings] = await Promise.all([
+            db.query("SELECT service, provider, SUM(quantity) quantity, SUM(provider_cost) provider_cost, SUM(internal_charge) client_charge, currency FROM usage_events WHERE workspace_id=$1 GROUP BY service, provider, currency ORDER BY service, provider", [workspaceId]),
+            db.query("SELECT id, channel, provider_name, active, config_ref, created_at FROM communication_providers WHERE workspace_id=$1 ORDER BY channel, provider_name", [workspaceId]),
+            db.query("SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE active)::int AS active FROM automations WHERE workspace_id=$1", [workspaceId]),
+            db.query("SELECT status, COUNT(*)::int AS count FROM calls WHERE workspace_id=$1 GROUP BY status", [workspaceId]),
+            db.query("SELECT model_routes, ai_defaults, communication_defaults FROM workspace_control_settings WHERE workspace_id=$1", [workspaceId])
+          ]);
+          sendJson(response, 200, { role: current.role, usage: usage.rows, providers: providers.rows, automations: automations.rows[0], calls: calls.rows, settings: settings.rows[0] ?? { model_routes: {}, ai_defaults: {}, communication_defaults: {} } }); return;
+        }
+        if (suffix === 'control-center/settings' && request.method === 'PATCH') {
+          requirePermission(context, 'workspace:manage'); const input = await body();
+          const settings = { modelRoutes: objectBody(input.modelRoutes ?? {}), aiDefaults: objectBody(input.aiDefaults ?? {}), communicationDefaults: objectBody(input.communicationDefaults ?? {}) };
+          const updated = await db.query(`INSERT INTO workspace_control_settings(workspace_id,model_routes,ai_defaults,communication_defaults,updated_by)
+            VALUES($1,$2::jsonb,$3::jsonb,$4::jsonb,$5)
+            ON CONFLICT(workspace_id) DO UPDATE SET model_routes=EXCLUDED.model_routes, ai_defaults=EXCLUDED.ai_defaults, communication_defaults=EXCLUDED.communication_defaults, updated_by=EXCLUDED.updated_by, updated_at=now()
+            RETURNING model_routes, ai_defaults, communication_defaults, updated_at`, [workspaceId, JSON.stringify(settings.modelRoutes), JSON.stringify(settings.aiDefaults), JSON.stringify(settings.communicationDefaults), current.userId]);
+          await audit(db, { workspaceId, actorUserId: current.userId, action: 'control_center.settings_updated', entityType: 'workspace_control_settings', entityId: workspaceId, request });
+          sendJson(response, 200, updated.rows[0]); return;
+        }
         if (suffix === 'automations/install-defaults' && request.method === 'POST') {
           requirePermission(context, 'automation:manage');
           await installDefaultAutomations(db, workspaceId, current.userId);
