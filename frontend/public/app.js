@@ -304,14 +304,45 @@ async function renderCalling() {
     <section class="panel"><div class="panel-header"><h2 class="panel-title">Call history</h2></div><div class="table-wrap"><table><thead><tr><th>Direction</th><th>Provider</th><th>Status</th><th>Started</th><th>Duration</th><th>Disposition</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
 }
 
+const automationActionTypes = ['create_task','create_activity','change_stage','create_message_draft','wait','create_lead','update_lead','assign_owner','create_note','invoke_ai','call_webhook','notify_user','book_appointment','schedule_follow_up','send_communication','start_call'];
+
+function automationDefaultConfig(type) {
+  if (type === 'create_task') return { title: 'Follow up', dueInMinutes: 60, assignTo: 'owner' };
+  if (type === 'create_activity' || type === 'create_note') return { title: 'Automation activity', body: '' };
+  if (type === 'wait') return { minutes: 60 };
+  if (type === 'schedule_follow_up') return { title: 'Follow up', dueInMinutes: 60 };
+  if (type === 'call_webhook') return { url: 'https://', method: 'POST' };
+  if (type === 'notify_user') return { message: 'Follow-up required' };
+  if (type === 'create_message_draft') return { channel: 'whatsapp', body: 'Follow-up message' };
+  return {};
+}
+
+function renderAutomationSteps() {
+  const root = $('#automationSteps'); if (!root) return;
+  root.innerHTML = (appState.automationSteps ?? []).map((step, index) => `<article class="pipeline-card" draggable="true" data-automation-step="${index}"><div class="panel-header"><div><span class="badge">STEP ${index + 1}</span> <strong>${escapeHtml(step.type)}</strong></div><button type="button" class="text-button" data-action="remove-automation-step" data-index="${index}">Remove</button></div><label>Configuration JSON<textarea data-step-config="${index}" rows="4">${escapeHtml(JSON.stringify(step.config, null, 2))}</textarea></label></article>`).join('') || '<div class="empty-state">Add at least one action from the palette.</div>';
+  root.querySelectorAll('[data-automation-step]').forEach(card => card.addEventListener('dragstart', event => event.dataTransfer.setData('text/plain', card.dataset.automationStep)));
+  root.addEventListener('dragover', event => event.preventDefault());
+  root.addEventListener('drop', event => {
+    event.preventDefault(); const from = Number(event.dataTransfer.getData('text/plain')); const target = event.target.closest('[data-automation-step]'); if (!Number.isInteger(from) || !target) return;
+    const to = Number(target.dataset.automationStep); if (from === to) return;
+    const [moved] = appState.automationSteps.splice(from, 1); appState.automationSteps.splice(to, 0, moved); renderAutomationSteps();
+  }, { once: true });
+}
+
 async function renderAutomations() {
   const result = await api(`${workspacePath('automations')}`);
   const canManage = ['owner','admin','manager'].includes(appState.role);
-  const rows = (result.data ?? []).map(item => `<tr><td><div class="lead-name">${escapeHtml(item.name)}</div><div class="lead-sub">v${escapeHtml(item.current_version_id?.slice(0,8) || '—')} · ${escapeHtml(item.description || '')}</div></td><td>${badge(item.trigger_type)}</td><td>${badge(item.active ? 'active' : 'inactive')}</td><td><button class="quiet-button" data-action="run-automation" data-id="${escapeHtml(item.id)}">Queue run</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Add a workflow to automate a task, stage change or message draft.</td></tr>';
-  setPage(`${pageHeading('WORKFLOW ENGINE', 'Automations', 'Versioned workflows run in the background with retries and an audit trail.', canManage ? '<button class="button button-primary" data-action="toggle-automation-form">+ New automation</button>' : '')}
-    <div class="notice">Allowed actions create a task, add an activity, change a pipeline stage or prepare a message draft. External sends stay behind consent checks and a configured provider adapter.</div>
-    <section id="automationFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Create automation</h2><button class="text-button" data-action="toggle-automation-form">Close</button></div><form id="automationForm" class="panel-body"><div class="field-grid"><label>Name<input name="name" required maxlength="160"></label><label>Trigger<select name="triggerType"><option>manual</option><option>lead.created</option><option>lead.updated</option><option>form.submitted</option><option>lead.stage_changed</option><option>message.incoming</option><option>email.incoming</option><option>appointment.created</option><option>appointment.missed</option><option>task.completed</option><option>meeting.created</option><option>meeting.missed</option><option>call.completed</option><option>call.ended</option><option>lead.no_response</option><option>lead.score_changed</option><option>scheduled.time</option><option>webhook.received</option><option>ai.decision</option></select></label><label>Description<input name="description" maxlength="500"></label><label>Action<select name="actionType"><option value="create_task">Create a task</option><option value="create_activity">Add an activity</option><option value="create_message_draft">Create a message draft</option></select></label><label class="span-2">Action title / message<textarea name="actionText" required maxlength="10000"></textarea></label><label class="span-2">Conditions JSON (optional)<textarea name="conditions"></textarea></label><label>Wait minutes<input name="waitMinutes" type="number" min="0" value="0"></label></div><label class="checkbox-row"><input name="active" type="checkbox" class="checkbox-input"> Activate after saving</label><button class="button button-primary">Save version 1</button></form></section>
-    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Workflows</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} workflows</p></div></div><div class="table-wrap"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
+  if (!Array.isArray(appState.automationSteps) || !appState.automationSteps.length) appState.automationSteps = [{ type: 'create_task', config: automationDefaultConfig('create_task') }];
+  const rows = (result.data ?? []).map(item => `<tr><td><div class="lead-name">${escapeHtml(item.name)}</div><div class="lead-sub">v${escapeHtml(item.current_version_id?.slice(0,8) || '—')} · ${escapeHtml(item.description || '')}</div></td><td>${badge(item.trigger_type)}</td><td>${badge(item.active ? 'active' : 'inactive')}</td><td><button class="quiet-button" data-action="run-automation" data-id="${escapeHtml(item.id)}">Queue run</button> <button class="quiet-button" data-action="automation-runs" data-id="${escapeHtml(item.id)}">Run history</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Add a workflow to automate sales work.</td></tr>';
+  setPage(`${pageHeading('WORKFLOW ENGINE', 'Automations', 'Build versioned workflows visually; drag actions to reorder execution.', canManage ? '<button class="button button-primary" data-action="toggle-automation-form">+ New automation</button>' : '')}
+    <div class="notice">Published workflow definitions are versioned. Provider-backed actions remain behind consent, configuration and idempotency controls.</div>
+    <section id="automationFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Visual automation builder</h2><button class="text-button" data-action="toggle-automation-form">Close</button></div><form id="automationForm" class="panel-body"><div class="field-grid"><label>Name<input name="name" required maxlength="160"></label><label>Trigger<select name="triggerType"><option>manual</option><option>lead.created</option><option>lead.updated</option><option>form.submitted</option><option>lead.stage_changed</option><option>message.incoming</option><option>email.incoming</option><option>appointment.created</option><option>appointment.missed</option><option>task.completed</option><option>meeting.created</option><option>meeting.missed</option><option>call.completed</option><option>call.ended</option><option>lead.no_response</option><option>lead.score_changed</option><option>scheduled.time</option><option>webhook.received</option><option>ai.decision</option></select></label><label class="span-2">Description<input name="description" maxlength="500"></label><label class="span-2">Trigger / condition JSON<textarea name="conditions" placeholder='{"all":[{"field":"score","operator":">=","value":70}]}'></textarea></label></div>
+      <div class="panel-header"><div><h3 class="panel-title">Action palette</h3><p class="panel-subtitle">Add actions, then drag cards to change execution order.</p></div></div><div class="heading-actions">${automationActionTypes.map(type => `<button type="button" class="button button-secondary button-small" data-action="add-automation-step" data-type="${type}">+${escapeHtml(type.replaceAll('_',' '))}</button>`).join('')}</div>
+      <div id="automationSteps" class="panel-body"></div>
+      <label class="checkbox-row"><input name="active" type="checkbox" class="checkbox-input"> Activate after saving</label><button class="button button-primary">Save workflow version</button></form></section>
+    <section id="automationRunPanel" class="panel hidden"></section>
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Workflows</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} workflows</p></div></div><div class="table-wrap"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
+  renderAutomationSteps();
 }
 
 async function renderUsage() {
@@ -453,6 +484,9 @@ $('#viewRoot').addEventListener('click', async event => {
     else if (action === 'meeting-status') { await api(`${workspacePath(`meetings/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: button.dataset.status } }); showToast('Meeting updated.'); await renderMeetings(); }
     else if (action === 'field-required') { await api(`${workspacePath(`custom-fields/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { required: button.dataset.required === 'true' } }); showToast('Field settings updated.'); await renderWorkspace(); }
     else if (action === 'toggle-automation-form') $('#automationFormPanel').classList.toggle('hidden');
+    else if (action === 'add-automation-step') { appState.automationSteps ??= []; appState.automationSteps.push({ type: button.dataset.type, config: automationDefaultConfig(button.dataset.type) }); renderAutomationSteps(); }
+    else if (action === 'remove-automation-step') { appState.automationSteps.splice(Number(button.dataset.index), 1); renderAutomationSteps(); }
+    else if (action === 'automation-runs') { const runs = await api(`${workspacePath(`automations/${encodeURIComponent(id)}/runs`)}?limit=50`); const panel=$('#automationRunPanel'); panel.innerHTML=`<div class="panel-header"><h2 class="panel-title">Run history</h2></div><div class="table-wrap"><table><thead><tr><th>Status</th><th>Attempts</th><th>Started</th><th>Completed</th><th>Error</th></tr></thead><tbody>${(runs.data??[]).map(run=>`<tr><td>${badge(run.status)}</td><td>${escapeHtml(run.attempt_count)}</td><td>${fmtDate(run.started_at,{time:true})}</td><td>${fmtDate(run.completed_at,{time:true})}</td><td>${escapeHtml(run.error_message||'—')}</td></tr>`).join('')||'<tr><td colspan="5" class="empty-state">No runs yet.</td></tr>'}</tbody></table></div>`; panel.classList.remove('hidden'); }
     else if (action === 'reload-view') await renderView(appState.view);
     else if (action === 'run-automation') {
       const key = `manual-${crypto.randomUUID()}`;
@@ -532,12 +566,16 @@ $('#viewRoot').addEventListener('submit', async event => {
       delete call.metadataNotes;
       await api(workspacePath('calls'), { method: 'POST', body: call }); showToast('Call record saved.'); await renderCalling();
     } else if (form.id === 'automationForm') {
-      const actionType = input.actionType;
-      const actionConfig = actionType === 'create_task' ? { title: input.actionText } : actionType === 'create_activity' ? { title: input.actionText } : { channel: 'whatsapp', body: input.actionText };
-      let conditionConfig = {}; if (input.conditions) { try { conditionConfig = JSON.parse(input.conditions); } catch { throw new Error('Conditions must be valid JSON.'); } }
-      const actions = []; if (Number(input.waitMinutes || 0) > 0) actions.push({ type: 'wait', config: { minutes: Number(input.waitMinutes) } }); actions.push({ type: actionType, config: actionConfig });
+      let conditionConfig = {}; if (input.conditions) { try { conditionConfig = JSON.parse(input.conditions); } catch { throw new Error('Trigger conditions must be valid JSON.'); } }
+      const actions = (appState.automationSteps ?? []).map((step, index) => {
+        const control = form.querySelector(`[data-step-config="${index}"]`); let config = step.config;
+        if (control) { try { config = JSON.parse(control.value); } catch { throw new Error(`Step ${index + 1} configuration must be valid JSON.`); } }
+        return { type: step.type, config };
+      });
+      if (!actions.length) throw new Error('Add at least one automation action.');
       const result = await api(workspacePath('automations'), { method: 'POST', body: { name: input.name, description: input.description || null, triggerType: input.triggerType, triggerConfig: conditionConfig, actions, active: form.elements.active.checked } });
-      showToast(`Automation saved as version 1${result.active ? ' and activated' : ''}.`); await renderAutomations();
+      appState.automationSteps = [{ type: 'create_task', config: automationDefaultConfig('create_task') }];
+      showToast(`Automation saved${result.active ? ' and activated' : ''}.`); await renderAutomations();
     } else if (form.id === 'estimateForm') {
       const estimate = await api(workspacePath('usage/estimate'), { method: 'POST', body: { ...input, quantity: Number(input.quantity) } });
       $('#estimateResult').innerHTML = `<div class="notice notice-green">Estimated provider cost: <strong>${fmtMoney(estimate.providerCost, estimate.currency)}</strong> · Customer charge: <strong>${fmtMoney(estimate.customerCharge, estimate.currency)}</strong> · Rate ${escapeHtml(estimate.rateId.slice(0, 8))}</div>`;
