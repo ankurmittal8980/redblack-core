@@ -88,3 +88,12 @@ test('bulk CRM actions cover owner stage and tags', () => {
   assert.match(app, /bulkTag/);
   assert.match(app, /bulkOwner/);
 });
+
+
+test('CRM navigation respects role-gated views', () => {
+  assert.match(app, /const VIEW_ROLES/);
+  assert.match(app, /automations: \['owner','admin','manager'\]/);
+  assert.match(app, /workspace: \['owner','admin'\]/);
+  assert.match(app, /!viewAllowed\(button\.dataset\.view, appState\.role\)/);
+  assert.match(app, /if \(!viewAllowed\(view, appState\.role\)\) view = 'dashboard'/);
+});
