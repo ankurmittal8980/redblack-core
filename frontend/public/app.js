@@ -147,11 +147,13 @@ async function renderDashboard() {
 }
 
 async function renderTrash() {
-  const result = await api(workspacePath('leads/trash'));
+  const params = new URLSearchParams({ limit: '50' });
+  if (appState.trashCursor) params.set('cursor', appState.trashCursor);
+  const result = await api(`${workspacePath('leads/trash')}?${params}`);
   const canRestore = ['owner','admin','manager','agent'].includes(appState.role);
   const rows = (result.data ?? []).map(lead => `<tr><td><div class="lead-name">${escapeHtml([lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</div><div class="lead-sub">${escapeHtml(lead.email || lead.phone || lead.company_name || '')}</div></td><td>${badge(lead.status)}</td><td>${fmtDate(lead.deleted_at, { time: true })}</td><td>${canRestore ? `<button class="quiet-button" data-action="restore-lead" data-id="${escapeHtml(lead.id)}">Restore</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Trash is empty.</td></tr>';
   setPage(`${pageHeading('DATA SAFETY', 'Lead trash', 'Archived leads remain recoverable and auditable.', '<button class="button button-secondary" data-view="leads">Back to leads</button>')}
-    <section class="panel"><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Deleted</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></div></section>`);
+    <section class="panel"><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Deleted</th><th></th></tr></thead><tbody>${rows}</tbody></table></div><div class="pagination"><button class="button button-secondary button-small" data-action="next-trash" ${result.nextCursor ? '' : 'disabled'} data-cursor="${escapeHtml(result.nextCursor ?? '')}">Load more</button></div></div></section>`);
 }
 
 async function renderLeads() {
@@ -399,6 +401,7 @@ $('#viewRoot').addEventListener('click', async event => {
     else if (action === 'select-all-leads') { document.querySelectorAll('[data-action="select-lead"]').forEach(input => { input.checked = button.checked; if (button.checked) appState.selectedLeads.add(input.dataset.id); else appState.selectedLeads.delete(input.dataset.id); }); await renderLeads(); }
     else if (action === 'bulk-trash') { if (!confirm('Move selected leads to Trash?')) return; await api(workspacePath('leads/bulk'), { method: 'POST', body: { leadIds: [...appState.selectedLeads], operation: 'trash' } }); appState.selectedLeads.clear(); showToast('Selected leads moved to Trash.'); await renderLeads(); }
     else if (action === 'next-leads') { appState.cursor = button.dataset.cursor; await renderLeads(); }
+    else if (action === 'next-trash') { appState.trashCursor = button.dataset.cursor; await renderTrash(); }
     else if (action === 'clear-lead-filters') { appState.cursor = null; appState.leadSearch = ''; appState.leadStatus = ''; appState.selectedLeads.clear(); await renderLeads(); }
     else if (action === 'toggle-task-form') $('#taskFormPanel').classList.toggle('hidden');
     else if (action === 'edit-task') openTaskEditor(id);
