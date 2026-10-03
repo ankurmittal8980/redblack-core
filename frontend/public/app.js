@@ -362,7 +362,8 @@ $('#viewRoot').addEventListener('click', async event => {
   if (!button) return;
   const { action, id } = button.dataset;
   try {
-    if (action === 'complete-task') { await api(`${workspacePath(`tasks/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: 'completed' } }); showToast('Task completed.'); await renderView(appState.view); return; }\n    if (action === 'toggle-new-lead') $('#newLeadPanel').classList.toggle('hidden');
+    if (action === 'complete-task') { await api(`${workspacePath(`tasks/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: 'completed' } }); showToast('Task completed.'); await renderView(appState.view); return; }
+    if (action === 'toggle-new-lead') $('#newLeadPanel').classList.toggle('hidden');
     else if (action === 'toggle-lead-edit') $('#leadEditPanel')?.classList.toggle('hidden');
     else if (action === 'new-lead') { renderView('leads'); setTimeout(() => $('#newLeadPanel')?.classList.remove('hidden'), 0); }
     else if (action === 'lead-details') await renderLeadDetail(id);
