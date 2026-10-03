@@ -8,6 +8,47 @@ import { hashPassword, verifyPassword, hashToken, safeEqual } from '../backend/s
 import { decimalProduct, decimalToUnits, unitsToDecimal, uuid } from '../backend/src/validation.js';
 import { SlidingWindowLimiter } from '../backend/src/auth.js';
 import { OPENAPI_SPEC } from '../backend/src/openapi.js';
+import { normalizeAutomation } from '../backend/src/server.js';
+import { AIGateway, missingCredential, normalizeUsage } from '../backend/src/ai-gateway.js';
+import { providerAdapter } from '../backend/src/ai-gateway.js';
+
+test('AI gateway routes, falls back safely, and normalizes usage', async () => {
+  const calls = [];
+  const gateway = new AIGateway({ routes: { default: { standard: ['openai:primary', 'anthropic:backup'] } }, adapters: {
+    openai: { complete: async () => { calls.push('openai'); throw new Error('temporary'); } },
+    anthropic: { complete: async () => { calls.push('anthropic'); return { provider: 'anthropic', model: 'backup', text: 'ok', usage: normalizeUsage({ inputTokens: 2, outputTokens: 3 }) }; } },
+    gemini: { complete: async () => { throw new Error('unused'); } }
+  } });
+  const response = await gateway.complete({ workspaceId: 'workspace-a', messages: [{ role: 'user', content: 'hello' }] });
+  assert.equal(response.text, 'ok');
+  assert.deepEqual(calls, ['openai', 'anthropic']);
+  assert.equal(missingCredential('gemini').code, 'AI_PROVIDER_UNAVAILABLE');
+});
+
+test('AI gateway never falls back after a tool capable request', async () => {
+  const gateway = new AIGateway({ routes: { default: { standard: ['openai:primary', 'anthropic:backup'] } }, adapters: {
+    openai: { complete: async () => { throw new Error('failed'); } }, anthropic: { complete: async () => ({ text: 'should not run' }) }, gemini: { complete: async () => ({}) }
+  } });
+  await assert.rejects(() => gateway.complete({ workspaceId: 'workspace-a', messages: [], toolCalls: true }), /failed/);
+});
+
+test('AI adapters enforce real processing capabilities and protect provider credentials', async () => {
+  let request;
+  const fetchImpl = async (url, options) => {
+    request = { url, options };
+    return { ok: true, headers: new Headers({ 'x-request-id': 'req-1' }), json: async () => ({ choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 2 } }) };
+  };
+  const openai = providerAdapter('openai', { env: { OPENAI_API_KEY: 'secret' }, fetchImpl });
+  await openai.complete({ model: 'gpt-test', messages: [{ role: 'user', content: 'hi' }], processing: 'flex' });
+  assert.equal(JSON.parse(request.options.body).service_tier, 'flex');
+  assert.equal(request.options.headers.authorization, 'Bearer secret');
+  await assert.rejects(() => openai.complete({ model: 'gpt-test', messages: [], processing: 'batch' }), /not supported/);
+  const gemini = providerAdapter('gemini', { env: { GEMINI_API_KEY: 'secret' }, fetchImpl });
+  await assert.rejects(() => gemini.complete({ model: 'gemini-test', messages: [], processing: 'flex' }), /not supported/);
+  await gemini.complete({ model: 'gemini-test', messages: [], processing: 'standard' });
+  assert.equal(new URL(request.url).search, '');
+  assert.equal(request.options.headers['x-goog-api-key'], 'secret');
+});
 
 test('CSV reader handles BOM, escaped quotes, commas and multiline cells', () => {
   const parsed = parseCsv('\uFEFFLead ID,Name,Notes\r\n42,"Mira, K.","called ""twice""\nand emailed"\r\n');
@@ -76,5 +117,16 @@ test('input validation rejects malformed identifiers and OpenAPI covers runtime 
   assert.equal(OPENAPI_SPEC.openapi, '3.1.0');
   assert.ok(OPENAPI_SPEC.paths['/api/v1/workspaces/{workspaceId}/reports/dashboard']);
   assert.ok(OPENAPI_SPEC.paths['/api/v1/webhooks/{provider}/calls']);
+});
+
+test('automation definitions support default follow-up ownership and delay actions', () => {
+  const definition = normalizeAutomation({
+    name: 'New lead follow-up', triggerType: 'lead.created', triggerConfig: {},
+    actions: [{ type: 'create_task', config: { title: 'Call lead', dueInMinutes: 60, assignTo: 'owner' } }]
+  });
+  assert.equal(definition.actions[0].config.assignTo, 'owner');
+  assert.equal(definition.actions[0].config.dueInMinutes, 60);
+  const delayed = normalizeAutomation({ name: 'Delayed', triggerType: 'lead.created', actions: [{ type: 'wait', config: { minutes: 10 } }] });
+  assert.equal(delayed.actions[0].config.minutes, 10);
 });
 
