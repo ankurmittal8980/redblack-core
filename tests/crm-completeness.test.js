@@ -30,3 +30,13 @@ test('existing configurable CRM surfaces remain wired', () => {
   assert.match(app, /workspacePath\('automations'\)/);
   assert.match(app, /workspacePath\('pipelines'\)/);
 });
+
+test('CRM daily workspace and builder contracts are present', () => {
+  assert.match(app, /async function renderToday/);
+  assert.match(app, /leadEditForm/);
+  assert.match(app, /select-all-leads/);
+  assert.match(app, /Conditions JSON/);
+  assert.match(app, /waitMinutes/);
+  assert.match(server, /operation === 'status'/);
+  assert.match(server, /operation === 'owner'/);
+});
