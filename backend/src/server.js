@@ -931,6 +931,35 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         if (suffix === 'assignment-rules' && request.method === 'POST') { requirePermission(context, 'workspace:manage'); const input=await body(); const result=await db.query('INSERT INTO crm_assignment_rules(workspace_id,name,priority,conditions,strategy,config,active) VALUES($1,$2,$3,$4::jsonb,$5,$6::jsonb,$7) RETURNING *',[workspaceId,requiredString(input.name,'name',{max:160}),Math.trunc(finiteNumber(input.priority??100,'priority',{min:0,max:10000})),JSON.stringify(objectBody(input.conditions??{})),enumValue(input.strategy,'strategy',['fixed_owner','round_robin','unassigned']),JSON.stringify(objectBody(input.config??{})),booleanInput(input.active,'active',true)]); sendJson(response,201,result.rows[0]); return; }
         if (suffix === 'scoring-rules' && request.method === 'GET') { requirePermission(context, 'crm:read'); const result=await db.query('SELECT * FROM crm_scoring_rules WHERE workspace_id=$1 ORDER BY priority,id',[workspaceId]); sendJson(response,200,{data:result.rows}); return; }
         if (suffix === 'scoring-rules' && request.method === 'POST') { requirePermission(context, 'workspace:manage'); const input=await body(); const result=await db.query('INSERT INTO crm_scoring_rules(workspace_id,name,priority,conditions,score_delta,active) VALUES($1,$2,$3,$4::jsonb,$5,$6) RETURNING *',[workspaceId,requiredString(input.name,'name',{max:160}),Math.trunc(finiteNumber(input.priority??100,'priority',{min:0,max:10000})),JSON.stringify(objectBody(input.conditions??{})),Math.trunc(finiteNumber(input.scoreDelta,'scoreDelta',{min:-10000,max:10000})),booleanInput(input.active,'active',true)]); sendJson(response,201,result.rows[0]); return; }
+        const assignmentRuleMatch = suffix.match(/^assignment-rules\/([^/]+)$/);
+        if (assignmentRuleMatch && request.method === 'PATCH') {
+          requirePermission(context, 'workspace:manage'); const ruleId=uuid(assignmentRuleMatch[1],'ruleId'); const input=await body(); const values=[workspaceId,ruleId]; const sets=[];
+          if(input.name!==undefined){values.push(requiredString(input.name,'name',{max:160}));sets.push(`name=$${values.length}`);}
+          if(input.priority!==undefined){values.push(Math.trunc(finiteNumber(input.priority,'priority',{min:0,max:10000})));sets.push(`priority=$${values.length}`);}
+          if(input.conditions!==undefined){values.push(JSON.stringify(objectBody(input.conditions)));sets.push(`conditions=$${values.length}::jsonb`);}
+          if(input.strategy!==undefined){values.push(enumValue(input.strategy,'strategy',['fixed_owner','round_robin','unassigned']));sets.push(`strategy=$${values.length}`);}
+          if(input.config!==undefined){values.push(JSON.stringify(objectBody(input.config)));sets.push(`config=$${values.length}::jsonb`);}
+          if(input.active!==undefined){if(typeof input.active!=='boolean')throw new ValidationError('active must be a boolean.');values.push(input.active);sets.push(`active=$${values.length}`);}
+          if(!sets.length)throw new HttpError(400,'NO_FIELDS','Provide assignment rule settings.');
+          const result=await db.query(`UPDATE crm_assignment_rules SET ${sets.join(', ')},updated_at=now() WHERE workspace_id=$1 AND id=$2 RETURNING *`,values);
+          if(!result.rows[0])throw new HttpError(404,'ASSIGNMENT_RULE_NOT_FOUND','Assignment rule was not found.');
+          await audit(db,{workspaceId,actorUserId:current.userId,action:'crm.assignment_rule_updated',entityType:'crm_assignment_rule',entityId:ruleId,request});
+          sendJson(response,200,result.rows[0]);return;
+        }
+        const scoringRuleMatch = suffix.match(/^scoring-rules\/([^/]+)$/);
+        if (scoringRuleMatch && request.method === 'PATCH') {
+          requirePermission(context, 'workspace:manage'); const ruleId=uuid(scoringRuleMatch[1],'ruleId'); const input=await body(); const values=[workspaceId,ruleId]; const sets=[];
+          if(input.name!==undefined){values.push(requiredString(input.name,'name',{max:160}));sets.push(`name=$${values.length}`);}
+          if(input.priority!==undefined){values.push(Math.trunc(finiteNumber(input.priority,'priority',{min:0,max:10000})));sets.push(`priority=$${values.length}`);}
+          if(input.conditions!==undefined){values.push(JSON.stringify(objectBody(input.conditions)));sets.push(`conditions=$${values.length}::jsonb`);}
+          if(input.scoreDelta!==undefined){values.push(Math.trunc(finiteNumber(input.scoreDelta,'scoreDelta',{min:-10000,max:10000})));sets.push(`score_delta=$${values.length}`);}
+          if(input.active!==undefined){if(typeof input.active!=='boolean')throw new ValidationError('active must be a boolean.');values.push(input.active);sets.push(`active=$${values.length}`);}
+          if(!sets.length)throw new HttpError(400,'NO_FIELDS','Provide scoring rule settings.');
+          const result=await db.query(`UPDATE crm_scoring_rules SET ${sets.join(', ')},updated_at=now() WHERE workspace_id=$1 AND id=$2 RETURNING *`,values);
+          if(!result.rows[0])throw new HttpError(404,'SCORING_RULE_NOT_FOUND','Scoring rule was not found.');
+          await audit(db,{workspaceId,actorUserId:current.userId,action:'crm.scoring_rule_updated',entityType:'crm_scoring_rule',entityId:ruleId,request});
+          sendJson(response,200,result.rows[0]);return;
+        }
         if (suffix === 'saved-views' && request.method === 'GET') { requirePermission(context, 'crm:read'); const result=await db.query('SELECT * FROM crm_saved_views WHERE workspace_id=$1 AND entity_type=$2 AND (user_id IS NULL OR user_id=$3) ORDER BY name',[workspaceId,url.searchParams.get('entityType')??'lead',current.userId]); sendJson(response,200,{data:result.rows}); return; }
         if (suffix === 'saved-views' && request.method === 'POST') { requirePermission(context, 'crm:read'); const input=await body(); const result=await db.query('INSERT INTO crm_saved_views(workspace_id,user_id,entity_type,name,config) VALUES($1,$2,$3,$4,$5::jsonb) RETURNING *',[workspaceId,current.userId,enumValue(input.entityType??'lead','entityType',['lead']),requiredString(input.name,'name',{max:160}),JSON.stringify(objectBody(input.config??{}))]); sendJson(response,201,result.rows[0]); return; }
         if (suffix === 'layouts' && request.method === 'GET') { requirePermission(context, 'crm:read'); const result=await db.query('SELECT * FROM crm_layouts WHERE workspace_id=$1 AND entity_type=$2 ORDER BY name',[workspaceId,url.searchParams.get('entityType')??'lead']); sendJson(response,200,{data:result.rows}); return; }
