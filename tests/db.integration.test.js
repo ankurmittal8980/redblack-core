@@ -115,6 +115,7 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   const stageId = (await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'Qualified','qualified',1) RETURNING id", [pipelineId])).rows[0].id;
   const secondStageId = (await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'Proposal','proposal',2) RETURNING id", [pipelineId])).rows[0].id;
   const requiredFieldId = (await db.query("INSERT INTO custom_field_definitions(workspace_id,entity_type,field_key,label,field_type,required,config) VALUES($1,'lead','segment','Segment','text',true,'{}'::jsonb) RETURNING id", [workspaceA])).rows[0].id;
+  const meetingId = (await db.query("INSERT INTO meetings(workspace_id,lead_id,owner_user_id,starts_at,status,meeting_type) VALUES($1,$2,$3,now(),'scheduled','Test') RETURNING id", [workspaceA, leadA, userId])).rows[0].id;
   const session = await createSession(db, { userId, workspaceId: workspaceA });
   const server = createRedBlackServer({ db });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -127,6 +128,13 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   };
   const bulk = body => fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
   try {
+    const meetingsResponse = await fetch(`http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/meetings?limit=10`, { headers });
+    assert.equal(meetingsResponse.status, 200);
+    const meetingsPayload = await meetingsResponse.json();
+    assert.equal(meetingsPayload.data.some(item => item.id === meetingId), true);
+    const meetingsByLead = await fetch(`http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/meetings?leadId=${leadA}&limit=10`, { headers });
+    assert.equal(meetingsByLead.status, 200);
+
     const createEndpoint = `http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/leads`;
     const missingRequired = await fetch(createEndpoint, { method:'POST', headers, body:JSON.stringify({ firstName:'Missing Required' }) });
     assert.equal(missingRequired.status, 400);
