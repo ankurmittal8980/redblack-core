@@ -611,7 +611,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         const leadRoute = suffix.match(/^leads\/([^/]+)(?:\/(.*))?$/);
         if (leadRoute) {
           const leadId = uuid(leadRoute[1], 'leadId'); const action = leadRoute[2] ?? '';
-          if (action === 'restore') await trashedLeadVisible(db, context, leadId);
+          if (action === 'restore' || action === 'permanent') await trashedLeadVisible(db, context, leadId);
           else await leadVisible(db, context, leadId);
           if (request.method === 'GET' && !action) {
             requirePermission(context, 'crm:read');
@@ -694,6 +694,13 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             const result = await db.query('UPDATE leads SET deleted_at = now(), updated_at = now() WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL RETURNING id', [workspaceId, leadId]);
             await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.archived', entityType: 'lead', entityId: leadId, request });
             sendJson(response, 200, { id: result.rows[0]?.id, archived: true }); return;
+          }
+          if (request.method === 'DELETE' && action === 'permanent') {
+            requirePermission(context, 'workspace:manage');
+            await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.permanently_deleted', entityType: 'lead', entityId: leadId, request });
+            const result = await db.query('DELETE FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NOT NULL RETURNING id', [workspaceId, leadId]);
+            if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not in trash.');
+            sendJson(response, 200, { id: leadId, deleted: true }); return;
           }
           if (request.method === 'POST' && action === 'restore') {
             requirePermission(context, 'crm:write');
