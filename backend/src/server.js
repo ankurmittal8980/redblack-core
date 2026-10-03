@@ -24,7 +24,7 @@ const CHANNELS = ['email', 'whatsapp', 'rcs', 'voice'];
 const CALL_DIRECTIONS = ['inbound', 'outbound'];
 const CALL_STATUSES = ['queued', 'ringing', 'answered', 'missed', 'busy', 'failed', 'cancelled'];
 const ACTIVITY_TYPES = ['call', 'email', 'whatsapp', 'rcs', 'meeting', 'note', 'status_change', 'system'];
-const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft', 'wait'];
+const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft', 'wait', 'create_lead', 'update_lead', 'assign_owner', 'create_note', 'invoke_ai', 'call_webhook', 'notify_user', 'book_appointment', 'schedule_follow_up', 'send_communication'];
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'], ['.css', 'text/css; charset=utf-8'], ['.js', 'text/javascript; charset=utf-8'],
   ['.svg', 'image/svg+xml'], ['.png', 'image/png'], ['.ico', 'image/x-icon']
@@ -1211,7 +1211,7 @@ export function normalizeAutomation(input) {
   return {
     name: requiredString(input.name, 'name', { max: 160 }),
     description: optionalString(input.description, 'description', 5000),
-    triggerType: enumValue(input.triggerType, 'triggerType', ['manual', 'lead.created', 'lead.stage_changed', 'task.completed', 'meeting.created', 'meeting.missed', 'call.ended', 'lead.no_response']),
+    triggerType: enumValue(input.triggerType, 'triggerType', ['manual', 'lead.created', 'lead.updated', 'form.submitted', 'lead.stage_changed', 'message.incoming', 'email.incoming', 'appointment.created', 'appointment.missed', 'task.completed', 'meeting.created', 'meeting.missed', 'call.completed', 'call.ended', 'lead.no_response', 'lead.score_changed', 'scheduled.time', 'webhook.received', 'ai.decision']),
     triggerConfig: objectBody(input.triggerConfig ?? {}),
     actions: actions.map((action, position) => {
       objectBody(action);
