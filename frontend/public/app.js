@@ -428,6 +428,13 @@ $('#viewRoot').addEventListener('click', async event => {
 
 $('#viewRoot').addEventListener('change', async event => {
   if (event.target.id === 'leadStatus') { appState.leadStatus = event.target.value; appState.cursor = null; await renderLeads(); }
+  if (event.target.id === 'bulkStatus' && event.target.value) {
+    if (!appState.selectedLeads.size) { showToast('Select at least one lead.', 'error'); event.target.value = ''; return; }
+    try {
+      await api(workspacePath('leads/bulk'), { method: 'POST', body: { leadIds: [...appState.selectedLeads], operation: 'status', status: event.target.value } });
+      appState.selectedLeads.clear(); showToast('Selected lead statuses updated.'); await renderLeads();
+    } catch (error) { showToast(error.message, 'error'); }
+  }
   if (event.target.id === 'pipelineChoice') return;
   if (event.target.matches('[data-action="move-stage"]') && event.target.value) {
     const select = event.target; const stageId = select.value;
