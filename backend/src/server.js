@@ -1480,7 +1480,9 @@ function automationMatches(config, event) {
 async function applyLeadRules(db, { workspaceId, leadId, actorUserId = null }) {
   const leadResult = await db.query('SELECT * FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
   const lead = leadResult.rows[0]; if (!lead) return { scoreChanged: false };
-  const context = { ...lead, sourceId: lead.source_id, ownerId: lead.owner_user_id, opportunityType: lead.opportunity_type, brandProject: lead.brand_project };
+  const customRows = await db.query(`SELECT d.field_key,v.value FROM lead_custom_fields v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE d.workspace_id=$1 AND v.lead_id=$2`, [workspaceId,leadId]);
+  const custom = Object.fromEntries(customRows.rows.map(row => [row.field_key,row.value]));
+  const context = { ...lead, custom, sourceId: lead.source_id, ownerId: lead.owner_user_id, opportunityType: lead.opportunity_type, brandProject: lead.brand_project };
   const scoring = await db.query('SELECT conditions,score_delta FROM crm_scoring_rules WHERE workspace_id=$1 AND active=true ORDER BY priority,id', [workspaceId]);
   let scoreChanged = false;
   if (scoring.rows.length) {
