@@ -508,7 +508,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           const result = await db.query(
             `SELECT l.id, l.first_name, l.last_name, l.company_name, l.email, l.phone, l.source_id,
                     l.brand_project, l.opportunity_type, l.budget, l.location, l.requirement, l.status,
-                    l.temperature, l.score, l.next_action, l.next_action_at, l.owner_user_id, l.created_at, l.updated_at
+                    l.temperature, l.score, l.next_action, l.next_action_at, l.owner_user_id, l.created_at, l.updated_at,
+                    (SELECT e.current_stage_id FROM lead_pipeline_entries e WHERE e.workspace_id=l.workspace_id AND e.lead_id=l.id AND e.is_current ORDER BY e.entered_at DESC LIMIT 1) AS current_stage_id,
+                    (SELECT e.pipeline_id FROM lead_pipeline_entries e WHERE e.workspace_id=l.workspace_id AND e.lead_id=l.id AND e.is_current ORDER BY e.entered_at DESC LIMIT 1) AS current_pipeline_id
                FROM leads l WHERE ${filters.join(' AND ')} ORDER BY l.created_at DESC, l.id DESC LIMIT $${values.length}`,
             values
           );
