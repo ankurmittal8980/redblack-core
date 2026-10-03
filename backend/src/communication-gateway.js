@@ -9,6 +9,11 @@ function consentDenied() { return Object.assign(new Error('Lead has opted out of
 
 export class CommunicationGateway {
   constructor({ db, registry, callingRegistry = null, clock = () => new Date() }) { this.db = db; this.registry = registry; this.calling = callingRegistry; this.clock = clock; }
+  async leadAllowed(workspaceId, leadId) {
+    const lead = await this.db.query('SELECT do_not_contact, consent FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
+    if (!lead.rows[0]) throw Object.assign(new Error('Lead was not found in this workspace.'), { code: 'LEAD_NOT_FOUND', status: 404 });
+    if (lead.rows[0].do_not_contact || lead.rows[0].consent === false) throw Object.assign(new Error('Lead has opted out of communications.'), { code: 'COMMUNICATION_CONSENT_REQUIRED', status: 403 });
+  }
   async send({ workspaceId, leadId, channel, provider, to, subject = null, body, idempotencyKey = randomUUID(), metadata = {} }) {
     assertChannel(channel);
     const lead = await this.db.query('SELECT do_not_contact, consent FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
