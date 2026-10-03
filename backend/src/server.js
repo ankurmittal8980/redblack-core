@@ -634,6 +634,28 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
                 input.nextActionAt ? isoDate(input.nextActionAt, 'nextActionAt') : null, booleanInput(input.doNotContact, 'doNotContact')]
             );
             const lead = inserted.rows[0];
+            const customFields = input.customFields && typeof input.customFields === 'object' && !Array.isArray(input.customFields) ? input.customFields : {};
+            const definitions = await client.query("SELECT id,label,required FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type='lead'", [workspaceId]);
+            const definitionsById = new Map(definitions.rows.map(item => [item.id, item]));
+            for (const [rawFieldId, value] of Object.entries(customFields)) {
+              const fieldId = uuid(rawFieldId, 'customFieldId'); const definition = definitionsById.get(fieldId);
+              if (!definition) throw new HttpError(400, 'INVALID_CUSTOM_FIELD', 'A custom field does not belong to this workspace.');
+              if (definition.required && (value === null || value === '' || (Array.isArray(value) && value.length === 0))) throw new ValidationError(`${definition.label} is required.`);
+            }
+            for (const definition of definitions.rows.filter(item => item.required)) {
+              const value = customFields[definition.id];
+              if (value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0)) throw new ValidationError(`${definition.label} is required.`);
+            }
+            for (const [rawFieldId, value] of Object.entries(customFields)) {
+              const fieldId = uuid(rawFieldId, 'customFieldId');
+              await client.query('INSERT INTO lead_custom_fields(workspace_id,lead_id,field_definition_id,value) VALUES($1,$2,$3,$4::jsonb)', [workspaceId, lead.id, fieldId, JSON.stringify(value)]);
+            }
+            const tagIds = Array.isArray(input.tagIds) ? [...new Set(input.tagIds.map(value => uuid(value, 'tagId')))] : [];
+            if (tagIds.length) {
+              const validTags = await client.query('SELECT id FROM tags WHERE workspace_id=$1 AND id=ANY($2::uuid[])', [workspaceId, tagIds]);
+              if (validTags.rows.length !== tagIds.length) throw new HttpError(400, 'INVALID_TAG', 'One or more tags do not belong to this workspace.');
+              for (const tagId of tagIds) await client.query('INSERT INTO lead_tags(workspace_id,lead_id,tag_id) VALUES($1,$2,$3)', [workspaceId, lead.id, tagId]);
+            }
             if (input.pipelineId || input.stageId) {
               const pipelineId = uuid(input.pipelineId, 'pipelineId'); const stageId = uuid(input.stageId, 'stageId');
               await client.query(`INSERT INTO lead_pipeline_entries(workspace_id, lead_id, pipeline_id, current_stage_id) VALUES($1,$2,$3,$4)`, [workspaceId, lead.id, pipelineId, stageId]);
@@ -710,9 +732,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
                 const definitionId = uuid(fieldId, 'customFieldId');
                 const definition = await db.query("SELECT id,required FROM custom_field_definitions WHERE workspace_id=$1 AND id=$2 AND entity_type='lead'", [workspaceId, definitionId]);
                 if (!definition.rows[0]) throw new HttpError(400, 'INVALID_CUSTOM_FIELD', 'A custom field does not belong to this workspace.');
-                if (definition.rows[0].required && (value === null || value === '')) throw new ValidationError('Required custom fields cannot be empty.');
-                await db.query(`INSERT INTO lead_custom_fields(lead_id,field_definition_id,value) VALUES($1,$2,$3::jsonb)
-                  ON CONFLICT(lead_id,field_definition_id) DO UPDATE SET value=EXCLUDED.value`, [leadId, definitionId, JSON.stringify(value)]);
+                if (definition.rows[0].required && (value === null || value === '' || (Array.isArray(value) && value.length === 0))) throw new ValidationError('Required custom fields cannot be empty.');
+                await db.query(`INSERT INTO lead_custom_fields(workspace_id,lead_id,field_definition_id,value) VALUES($1,$2,$3,$4::jsonb)
+                  ON CONFLICT(lead_id,field_definition_id) DO UPDATE SET workspace_id=EXCLUDED.workspace_id,value=EXCLUDED.value`, [workspaceId, leadId, definitionId, JSON.stringify(value)]);
               }
             }
             if (hasTags) {
@@ -721,8 +743,8 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
                 const valid = await db.query('SELECT id FROM tags WHERE workspace_id=$1 AND id=ANY($2::uuid[])', [workspaceId, tagIds]);
                 if (valid.rows.length !== tagIds.length) throw new HttpError(400, 'INVALID_TAG', 'One or more tags do not belong to this workspace.');
               }
-              await db.query('DELETE FROM lead_tags WHERE lead_id=$1', [leadId]);
-              for (const tagId of tagIds) await db.query('INSERT INTO lead_tags(lead_id,tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [leadId, tagId]);
+              await db.query('DELETE FROM lead_tags WHERE workspace_id=$1 AND lead_id=$2', [workspaceId, leadId]);
+              for (const tagId of tagIds) await db.query('INSERT INTO lead_tags(workspace_id,lead_id,tag_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING', [workspaceId, leadId, tagId]);
             }
             await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.updated', entityType: 'lead', entityId: leadId, request, metadata: { fields: [...updates.keys()], customFields: hasCustomFields, tags: hasTags } });
             const ruleResult = await applyLeadRules(db, { workspaceId, leadId, actorUserId: current.userId });
