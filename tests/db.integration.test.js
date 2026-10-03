@@ -90,6 +90,7 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   await db.query('INSERT INTO lead_tags(workspace_id,lead_id,tag_id) VALUES($1,$2,$3)', [workspaceA, leadA, oldTag]);
   const pipelineId = (await db.query("INSERT INTO pipelines(workspace_id,name,slug) VALUES($1,'Bulk','bulk') RETURNING id", [workspaceA])).rows[0].id;
   const stageId = (await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'Qualified','qualified',1) RETURNING id", [pipelineId])).rows[0].id;
+  const secondStageId = (await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'Proposal','proposal',2) RETURNING id", [pipelineId])).rows[0].id;
   const session = await createSession(db, { userId, workspaceId: workspaceA });
   const server = createRedBlackServer({ db });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -116,6 +117,17 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
     assert.equal(staged.status, 200, await staged.text());
     const history = await db.query('SELECT workspace_id,pipeline_id,to_stage_id FROM lead_stage_history WHERE lead_id=$1 ORDER BY changed_at DESC LIMIT 1', [leadA]);
     assert.deepEqual(history.rows[0], { workspace_id: workspaceA, pipeline_id: pipelineId, to_stage_id: stageId });
+
+    const reordered = await fetch(`http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/pipelines/${pipelineId}/stages/${stageId}`, {
+      method: 'PATCH', headers, body: JSON.stringify({ position: 2 })
+    });
+    assert.equal(reordered.status, 200, await reordered.text());
+    const positions = await db.query('SELECT id,position FROM pipeline_stages WHERE pipeline_id=$1 AND id=ANY($2::uuid[]) ORDER BY id', [pipelineId, [stageId, secondStageId]]);
+    const byId = Object.fromEntries(positions.rows.map(row => [row.id, Number(row.position)]));
+    assert.equal(byId[stageId], 2);
+    assert.equal(byId[secondStageId], 1);
+    const stageAudit = await db.query("SELECT 1 FROM audit_logs WHERE workspace_id=$1 AND entity_id=$2 AND action='pipeline.stage_updated'", [workspaceA, stageId]);
+    assert.equal(stageAudit.rowCount, 1);
   } finally {
     await new Promise(resolve => server.close(resolve));
     await db.end();
