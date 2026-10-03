@@ -112,6 +112,17 @@ function renderLeadRows(rows) {
   </tr>`).join('');
 }
 
+async function renderToday() {
+  const [tasks, leads] = await Promise.all([api(`${workspacePath('tasks')}?limit=100`), api(`${workspacePath('leads')}?limit=100`)]);
+  const now = new Date(); const day = new Date(now); day.setHours(23,59,59,999);
+  const taskRows = (tasks.data ?? []).filter(t => t.status !== 'completed' && t.status !== 'cancelled').map(t => `<tr><td>${escapeHtml(t.title)}</td><td>${fmtDate(t.due_at, { time: true })}</td><td>${badge(t.status)}</td><td><button class="quiet-button" data-action="complete-task" data-id="${escapeHtml(t.id)}">Complete</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No open follow-ups.</td></tr>';
+  const hot = (leads.data ?? []).filter(l => ['hot','warm'].includes(String(l.temperature).toLowerCase()) || Number(l.score) >= 70).slice(0,20);
+  setPage(`${pageHeading('DAILY SALES DESK', 'Today', 'Prioritize overdue work, follow-ups and high-intent leads.', '<button class="button button-secondary" data-view="tasks">Open tasks</button>')}
+    <section class="metrics"><article class="metric-card"><span class="metric-label">Open follow-ups</span><strong>${fmtNumber((tasks.data ?? []).filter(t => !['completed','cancelled'].includes(t.status)).length)}</strong></article><article class="metric-card"><span class="metric-label">Hot / high score</span><strong>${fmtNumber(hot.length)}</strong></article></section>
+    <section class="panel"><div class="panel-header"><h2 class="panel-title">Follow-up queue</h2></div><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Task</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>${taskRows}</tbody></table></div></div></section>
+    <section class="panel"><div class="panel-header"><h2 class="panel-title">Hot and high-score leads</h2></div><div class="panel-body"><div class="task-list">${hot.map(l => `<button class="task-row" data-action="lead-details" data-id="${escapeHtml(l.id)}"><span class="badge">${escapeHtml(l.temperature || l.score)}</span><span class="task-title">${escapeHtml([l.first_name,l.last_name].filter(Boolean).join(' ') || l.email || 'Lead')}</span><span class="task-due">${escapeHtml(l.status || '')}</span></button>`).join('') || '<div class="empty-state">No hot leads.</div>'}</div></div></section>`);
+}
+
 async function renderDashboard() {
   const [report, leads, tasks, pipelines] = await Promise.all([
     api(`${workspacePath('reports/dashboard')}?from=${encodeURIComponent(new Date(Date.now() - 30 * 86400000).toISOString())}&to=${encodeURIComponent(new Date().toISOString())}`),
