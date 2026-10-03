@@ -1055,9 +1055,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             const [leads, meetings] = await Promise.all([
               db.query(
                 `SELECT COUNT(*) AS total_leads,
-                        COUNT(*) FILTER (WHERE lower(COALESCE(temperature,''))='hot' OR upper(COALESCE(status,''))='HOT') AS hot,
-                        COUNT(*) FILTER (WHERE upper(COALESCE(status,''))='WON') AS won,
-                        COUNT(*) FILTER (WHERE upper(COALESCE(status,''))='LOST') AS lost
+                        COUNT(*) FILTER (WHERE lower(COALESCE(temperature::text,''))='hot' OR upper(COALESCE(status::text,''))='HOT') AS hot,
+                        COUNT(*) FILTER (WHERE upper(COALESCE(status::text,''))='WON') AS won,
+                        COUNT(*) FILTER (WHERE upper(COALESCE(status::text,''))='LOST') AS lost
                    FROM leads WHERE workspace_id=$1 AND deleted_at IS NULL`, [workspaceId]
               ),
               db.query('SELECT COUNT(*) AS meetings FROM meetings WHERE workspace_id=$1 AND starts_at >= $2 AND starts_at < $3', [workspaceId, start, end])
@@ -1069,9 +1069,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           }
           const query = report === 'sales' ?
             `SELECT COUNT(*) FILTER (WHERE created_at >= $2) AS new_leads,
-                    COUNT(*) FILTER (WHERE upper(status) = 'WON') AS won,
-                    COUNT(*) FILTER (WHERE upper(status) = 'LOST') AS lost,
-                    COUNT(*) FILTER (WHERE upper(status) IN ('HOT','WARM')) AS qualified,
+                    COUNT(*) FILTER (WHERE upper(status::text) = 'WON') AS won,
+                    COUNT(*) FILTER (WHERE upper(status::text) = 'LOST') AS lost,
+                    COUNT(*) FILTER (WHERE upper(status::text) IN ('HOT','WARM')) AS qualified,
                     COALESCE((SELECT COUNT(*) FROM meetings m WHERE m.workspace_id=$1 AND m.starts_at >= $2 AND m.starts_at < $3),0) AS meetings,
                     COALESCE((SELECT COUNT(*) FROM calls c WHERE c.workspace_id=$1 AND c.started_at >= $2 AND c.started_at < $3 AND c.status='answered'),0) AS connected_calls,
                     COALESCE((SELECT SUM(duration_seconds) FROM calls c WHERE c.workspace_id=$1 AND c.started_at >= $2 AND c.started_at < $3),0) AS talk_time_seconds,
