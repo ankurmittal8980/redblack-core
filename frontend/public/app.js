@@ -162,7 +162,7 @@ async function renderLeads() {
   if (appState.cursor) params.set('cursor', appState.cursor);
   if (appState.leadSearch) params.set('q', appState.leadSearch);
   if (appState.leadStatus) params.set('status', appState.leadStatus);
-  const [result, fieldDefs, tagCatalog, sources] = await Promise.all([api(`${workspacePath('leads')}?${params}`), api(`${workspacePath('custom-fields')}?entityType=lead`), api(workspacePath('tags')), api(workspacePath('lead-sources'))]);
+  const [result, fieldDefs, tagCatalog, sources, savedViews] = await Promise.all([api(`${workspacePath('leads')}?${params}`), api(`${workspacePath('custom-fields')}?entityType=lead`), api(workspacePath('tags')), api(workspacePath('lead-sources')), api(`${workspacePath('saved-views')}?entityType=lead`)]);
   const createAllowed = ['owner','admin','manager','agent'].includes(appState.role);
   const action = createAllowed ? `<div class="heading-actions"><button class="button button-secondary" data-action="toggle-import-leads">Import CSV</button><a class="button button-secondary" href="${workspacePath('leads/export')}">Export CSV</a><button class="button button-primary" data-action="toggle-new-lead">+ New lead</button></div>` : `<a class="button button-secondary" href="${workspacePath('leads/export')}">Export CSV</a>`;
   setPage(`${pageHeading('CRM', 'Leads', 'Find, qualify and follow up with every opportunity.', action)}
@@ -178,7 +178,7 @@ async function renderLeads() {
       ${(fieldDefs.data??[]).map(field=>customFieldControl({...field,value:null})).join('')}
     </div><div class="panel-body"><strong>Tags</strong><div class="heading-actions">${(tagCatalog.data??[]).map(tag=>`<label class="checkbox-row"><input type="checkbox" data-new-lead-tag value="${escapeHtml(tag.id)}"> ${escapeHtml(tag.name)}</label>`).join('')||'<span class="muted">No tags configured.</span>'}</div></div><div class="heading-actions"><button class="button button-primary" type="submit">Save lead</button><button class="button button-secondary" type="reset">Clear</button></div></form></section>
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Lead directory</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} records on this page</p></div><span class="badge">${escapeHtml(appState.role)}</span></div>
-      <div class="panel-body"><div class="toolbar"><label><input type="checkbox" data-action="select-all-leads" aria-label="Select all visible leads"> Select all</label><button class="button button-secondary button-small" data-action="bulk-trash" ${appState.selectedLeads.size ? '' : 'disabled'}>Trash selected</button><select id="bulkStatus" aria-label="Bulk status"><option value="">Bulk status…</option><option>New Lead</option><option>Connected</option><option>Qualified</option><option>Won</option><option>Lost</option></select><input id="leadSearch" type="search" placeholder="Search name, email, phone or company" value="${escapeHtml(appState.leadSearch)}"><select id="leadStatus"><option value="">All statuses</option>${['New Lead','Contact Attempted','Connected','Qualified','Meeting / Presentation','Proposal','Negotiation','Won','Lost','HOT','WARM','COLD','NO RESPONSE'].map(item => `<option ${appState.leadStatus === item ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('')}</select><button class="button button-secondary button-small" data-action="clear-lead-filters">Clear</button></div>
+      <div class="panel-body"><div class="toolbar"><label>Saved view<select id="savedLeadView"><option value="">Current view</option>${(savedViews.data??[]).map(view=>`<option value="${escapeHtml(view.id)}" data-config="${escapeHtml(JSON.stringify(view.config||{}))}">${escapeHtml(view.name)}</option>`).join('')}</select></label><form id="savedViewForm" class="inline-form"><input name="name" placeholder="Save current view as…" required maxlength="160"><button class="button button-secondary button-small">Save view</button></form><label><input type="checkbox" data-action="select-all-leads" aria-label="Select all visible leads"> Select all</label><button class="button button-secondary button-small" data-action="bulk-trash" ${appState.selectedLeads.size ? '' : 'disabled'}>Trash selected</button><select id="bulkStatus" aria-label="Bulk status"><option value="">Bulk status…</option><option>New Lead</option><option>Connected</option><option>Qualified</option><option>Won</option><option>Lost</option></select><input id="leadSearch" type="search" placeholder="Search name, email, phone or company" value="${escapeHtml(appState.leadSearch)}"><select id="leadStatus"><option value="">All statuses</option>${['New Lead','Contact Attempted','Connected','Qualified','Meeting / Presentation','Proposal','Negotiation','Won','Lost','HOT','WARM','COLD','NO RESPONSE'].map(item => `<option ${appState.leadStatus === item ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('')}</select><button class="button button-secondary button-small" data-action="clear-lead-filters">Clear</button></div>
       <div class="table-wrap"><table><thead><tr><th>Lead</th><th>Project / opportunity</th><th>Temperature / status</th><th>Budget</th><th>Next action</th><th></th></tr></thead><tbody>${renderLeadRows(result.data ?? [])}</tbody></table></div>
       <div class="pagination"><button class="button button-secondary button-small" data-action="next-leads" ${result.nextCursor ? '' : 'disabled'} data-cursor="${escapeHtml(result.nextCursor ?? '')}">Load more</button></div></div></section>`);
 }
@@ -508,6 +508,10 @@ $('#viewRoot').addEventListener('click', async event => {
 
 $('#viewRoot').addEventListener('change', async event => {
   if (event.target.id === 'leadStatus') { appState.leadStatus = event.target.value; appState.cursor = null; await renderLeads(); }
+  if (event.target.id === 'savedLeadView' && event.target.value) {
+    const option=event.target.selectedOptions[0]; let config={}; try{config=JSON.parse(option.dataset.config||'{}');}catch{}
+    appState.leadSearch=config.q||''; appState.leadStatus=config.status||''; appState.cursor=null; await renderLeads();
+  }
   if (event.target.id === 'bulkStatus' && event.target.value) {
     if (!appState.selectedLeads.size) { showToast('Select at least one lead.', 'error'); event.target.value = ''; return; }
     try {
@@ -562,6 +566,9 @@ $('#viewRoot').addEventListener('submit', async event => {
       const created=await api(workspacePath('leads'), { method: 'POST', body: lead });
       if(Object.keys(customFields).length||tagIds.length) await api(`${workspacePath(`leads/${encodeURIComponent(created.id)}`)}`,{method:'PATCH',body:{customFields,tagIds}});
       showToast('Lead created.'); appState.cursor = null; await renderLeads();
+    } else if (form.id === 'savedViewForm') {
+      await api(workspacePath('saved-views'), { method:'POST', body:{ entityType:'lead', name:input.name, config:{ q:appState.leadSearch||'', status:appState.leadStatus||'' } } });
+      showToast('Lead view saved.'); await renderLeads();
     } else if (form.id === 'csvImportForm') {
       const file = form.elements.file.files?.[0]; if (!file) throw new Error('Choose a CSV file.');
       const result = await api(workspacePath('leads/import'), { method: 'POST', body: { csv: await file.text() } });
