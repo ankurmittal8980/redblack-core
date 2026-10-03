@@ -1378,7 +1378,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         const reportMatch = suffix.match(/^reports\/(dashboard|sales|agents|sources)$/);
         if (reportMatch && request.method === 'GET') {
-          requirePermission(context, 'reports:read'); const report = reportMatch[1]; const start = url.searchParams.get('from') ? isoDate(url.searchParams.get('from'), 'from') : new Date(Date.now() - 30 * 86400_000).toISOString();
+          const report = reportMatch[1];
+          requirePermission(context, report === 'dashboard' ? 'crm:read' : 'reports:read');
+          const start = url.searchParams.get('from') ? isoDate(url.searchParams.get('from'), 'from') : new Date(Date.now() - 30 * 86400_000).toISOString();
           const end = url.searchParams.get('to') ? isoDate(url.searchParams.get('to'), 'to') : new Date().toISOString();
           if (report === 'dashboard') {
             const [leads, meetings] = await Promise.all([
@@ -1387,9 +1389,15 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
                         COUNT(*) FILTER (WHERE lower(COALESCE(temperature::text,''))='hot' OR upper(COALESCE(status::text,''))='HOT') AS hot,
                         COUNT(*) FILTER (WHERE upper(COALESCE(status::text,''))='WON') AS won,
                         COUNT(*) FILTER (WHERE upper(COALESCE(status::text,''))='LOST') AS lost
-                   FROM leads WHERE workspace_id=$1 AND deleted_at IS NULL`, [workspaceId]
+                   FROM leads l WHERE l.workspace_id=$1 AND l.deleted_at IS NULL
+                     AND ($2 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL))`,
+                [workspaceId, context.role, current.userId]
               ),
-              db.query('SELECT COUNT(*) AS meetings FROM meetings WHERE workspace_id=$1 AND starts_at >= $2 AND starts_at < $3', [workspaceId, start, end])
+              db.query(
+                `SELECT COUNT(*) AS meetings FROM meetings WHERE workspace_id=$1 AND starts_at >= $2 AND starts_at < $3
+                   AND ($4 <> 'agent' OR owner_user_id=$5)`,
+                [workspaceId, start, end, context.role, current.userId]
+              )
             ]);
             const summary = { ...leads.rows[0], meetings: meetings.rows[0].meetings };
             const decided = Number(summary.won) + Number(summary.lost);
