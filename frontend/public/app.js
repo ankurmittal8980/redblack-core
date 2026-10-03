@@ -162,7 +162,7 @@ async function renderLeads() {
   if (appState.cursor) params.set('cursor', appState.cursor);
   if (appState.leadSearch) params.set('q', appState.leadSearch);
   if (appState.leadStatus) params.set('status', appState.leadStatus);
-  const result = await api(`${workspacePath('leads')}?${params}`);
+  const [result, fieldDefs, tagCatalog, sources] = await Promise.all([api(`${workspacePath('leads')}?${params}`), api(`${workspacePath('custom-fields')}?entityType=lead`), api(workspacePath('tags')), api(workspacePath('lead-sources'))]);
   const createAllowed = ['owner','admin','manager','agent'].includes(appState.role);
   const action = createAllowed ? `<div class="heading-actions"><button class="button button-secondary" data-action="toggle-import-leads">Import CSV</button><a class="button button-secondary" href="${workspacePath('leads/export')}">Export CSV</a><button class="button button-primary" data-action="toggle-new-lead">+ New lead</button></div>` : `<a class="button button-secondary" href="${workspacePath('leads/export')}">Export CSV</a>`;
   setPage(`${pageHeading('CRM', 'Leads', 'Find, qualify and follow up with every opportunity.', action)}
@@ -173,8 +173,10 @@ async function renderLeads() {
       <label>Company<input name="companyName" maxlength="240"></label><label>Project / brand<input name="brandProject" maxlength="240"></label>
       <label>Opportunity type<input name="opportunityType" maxlength="160"></label><label>Budget (INR)<input name="budget" type="number" min="0" step="0.01"></label>
       <label>Status<input name="status" value="New Lead" maxlength="80"></label><label>Next follow-up<input name="nextActionAt" type="datetime-local"></label>
+      <label>Lead source<select name="sourceId"><option value="">—</option>${(sources.data??[]).map(source=>`<option value="${escapeHtml(source.id)}">${escapeHtml(source.name)}</option>`).join('')}</select></label><label>Temperature<select name="temperature"><option value="">—</option><option>hot</option><option>warm</option><option>cold</option></select></label>
       <label class="span-2">Requirement<textarea name="requirement" maxlength="5000"></textarea></label>
-    </div><div class="heading-actions"><button class="button button-primary" type="submit">Save lead</button><button class="button button-secondary" type="reset">Clear</button></div></form></section>
+      ${(fieldDefs.data??[]).map(field=>customFieldControl({...field,value:null})).join('')}
+    </div><div class="panel-body"><strong>Tags</strong><div class="heading-actions">${(tagCatalog.data??[]).map(tag=>`<label class="checkbox-row"><input type="checkbox" data-new-lead-tag value="${escapeHtml(tag.id)}"> ${escapeHtml(tag.name)}</label>`).join('')||'<span class="muted">No tags configured.</span>'}</div></div><div class="heading-actions"><button class="button button-primary" type="submit">Save lead</button><button class="button button-secondary" type="reset">Clear</button></div></form></section>
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Lead directory</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} records on this page</p></div><span class="badge">${escapeHtml(appState.role)}</span></div>
       <div class="panel-body"><div class="toolbar"><label><input type="checkbox" data-action="select-all-leads" aria-label="Select all visible leads"> Select all</label><button class="button button-secondary button-small" data-action="bulk-trash" ${appState.selectedLeads.size ? '' : 'disabled'}>Trash selected</button><select id="bulkStatus" aria-label="Bulk status"><option value="">Bulk status…</option><option>New Lead</option><option>Connected</option><option>Qualified</option><option>Won</option><option>Lost</option></select><input id="leadSearch" type="search" placeholder="Search name, email, phone or company" value="${escapeHtml(appState.leadSearch)}"><select id="leadStatus"><option value="">All statuses</option>${['New Lead','Contact Attempted','Connected','Qualified','Meeting / Presentation','Proposal','Negotiation','Won','Lost','HOT','WARM','COLD','NO RESPONSE'].map(item => `<option ${appState.leadStatus === item ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('')}</select><button class="button button-secondary button-small" data-action="clear-lead-filters">Clear</button></div>
       <div class="table-wrap"><table><thead><tr><th>Lead</th><th>Project / opportunity</th><th>Temperature / status</th><th>Budget</th><th>Next action</th><th></th></tr></thead><tbody>${renderLeadRows(result.data ?? [])}</tbody></table></div>
@@ -553,9 +555,13 @@ $('#viewRoot').addEventListener('submit', async event => {
       Object.keys(payload).filter(key => key.startsWith('cf:')).forEach(key => delete payload[key]);
       await api(`${workspacePath(`leads/${encodeURIComponent(leadId)}`)}`, { method: 'PATCH', body: payload }); showToast('Lead updated.'); await renderLeadDetail(leadId);
     } else if (form.id === 'newLeadForm') {
-      const lead = { ...input, budget: input.budget ? Number(input.budget) : null, nextActionAt: input.nextActionAt ? localDateTime(input.nextActionAt) : null };
-      Object.keys(lead).forEach(key => { if (lead[key] === '') lead[key] = null; });
-      await api(workspacePath('leads'), { method: 'POST', body: lead }); showToast('Lead created.'); appState.cursor = null; await renderLeads();
+      const customFields = {}; form.querySelectorAll('[name^="cf:"]').forEach(control => { const fieldId=control.name.slice(3); customFields[fieldId]=control.type==='checkbox'?control.checked:(control.multiple?[...control.selectedOptions].map(o=>o.value):(control.value||null)); });
+      const tagIds=[...form.querySelectorAll('[data-new-lead-tag]:checked')].map(control=>control.value);
+      const lead = { ...input, budget: input.budget ? Number(input.budget) : null, nextActionAt: input.nextActionAt ? localDateTime(input.nextActionAt) : null, temperature: input.temperature || null };
+      Object.keys(lead).filter(key=>key.startsWith('cf:')).forEach(key=>delete lead[key]); Object.keys(lead).forEach(key => { if (lead[key] === '') lead[key] = null; });
+      const created=await api(workspacePath('leads'), { method: 'POST', body: lead });
+      if(Object.keys(customFields).length||tagIds.length) await api(`${workspacePath(`leads/${encodeURIComponent(created.id)}`)}`,{method:'PATCH',body:{customFields,tagIds}});
+      showToast('Lead created.'); appState.cursor = null; await renderLeads();
     } else if (form.id === 'csvImportForm') {
       const file = form.elements.file.files?.[0]; if (!file) throw new Error('Choose a CSV file.');
       const result = await api(workspacePath('leads/import'), { method: 'POST', body: { csv: await file.text() } });
