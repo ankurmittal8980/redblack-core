@@ -459,7 +459,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         if (suffix === 'leads/trash' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
-          const result = await db.query('SELECT l.id, l.first_name, l.last_name, l.company_name, l.email, l.phone, l.status, l.deleted_at, l.updated_at FROM leads l WHERE l.workspace_id=$1 AND l.deleted_at IS NOT NULL ORDER BY l.deleted_at DESC LIMIT 100', [workspaceId]);
+          const result = await db.query('SELECT l.id, l.first_name, l.last_name, l.company_name, l.email, l.phone, l.status, l.deleted_at, l.updated_at FROM leads l WHERE l.workspace_id=$1 AND l.deleted_at IS NOT NULL AND ($2 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL)) ORDER BY l.deleted_at DESC LIMIT 100', [workspaceId, current.role, current.userId]);
           sendJson(response, 200, { data: result.rows }); return;
         }
 
@@ -467,6 +467,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           requirePermission(context, 'crm:write'); const input = await body();
           if (!Array.isArray(input.leadIds) || input.leadIds.length < 1 || input.leadIds.length > 100) throw new ValidationError('leadIds must contain 1 to 100 leads.');
           const ids = input.leadIds.map(value => uuid(value, 'leadId'));
+          if (context.role === 'agent') { const visible = await db.query('SELECT COUNT(*)::int AS count FROM leads l WHERE l.workspace_id=$1 AND l.id=ANY($2::uuid[]) AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL)', [workspaceId, ids, current.userId]); if (visible.rows[0].count !== ids.length) throw new HttpError(403, 'LEAD_SCOPE_FORBIDDEN', 'One or more leads are outside your assignment scope.'); }
           const operation = enumValue(input.operation, 'operation', ['trash', 'restore', 'status', 'owner']);
           const status = input.status ? requiredString(input.status, 'status', { max: 80 }) : null; const ownerId = input.ownerId ? uuid(input.ownerId, 'ownerId') : null; if (operation === 'status' && !status) throw new ValidationError('status is required.'); if (operation === 'owner' && !ownerId) throw new ValidationError('ownerId is required.'); const result = await db.query(operation === 'trash' ? 'UPDATE leads SET deleted_at=COALESCE(deleted_at, now()), updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id' : operation === 'restore' ? 'UPDATE leads SET deleted_at=NULL, updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NOT NULL RETURNING id' : operation === 'status' ? 'UPDATE leads SET status=$3, updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id' : 'UPDATE leads SET owner_user_id=$3, updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id', operation === 'status' ? [workspaceId, ids, status] : operation === 'owner' ? [workspaceId, ids, ownerId] : [workspaceId, ids]);
           await audit(db, { workspaceId, actorUserId: current.userId, action: `leads.bulk_${operation}`, entityType: 'lead', entityId: null, request, metadata: { count: result.rows.length } });
@@ -1247,7 +1248,8 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
       throw new HttpError(404, 'NOT_FOUND', 'Route was not found.');
     } catch (error) {
       const safe = userSafeError(error);
-      if (safe.status >= 500) process.stderr.write(JSON.stringify({ level: 'error', requestId, message: error.message, code: error.code ?? null }) + '\n');
+      if (safe.status >= 500) process.stderr.write(JSON.stringify({ level: 'error', requestId, message: error.message, code: error.code ?? null }) + '
+');
       if (!response.headersSent) sendJson(response, safe.status, { error: { code: safe.code, message: safe.message, requestId } });
       else response.destroy();
     }
@@ -1333,7 +1335,9 @@ export async function dispatchAutomationEvent(db, { workspaceId, eventType, lead
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const server = createRedBlackServer();
-  ensureDefaultAutomations().then(() => server.listen(config.port, '0.0.0.0', () => process.stdout.write(`RedBlack Core listening on ${config.port}\n`))).catch(error => { process.stderr.write(`${error.stack ?? error}\n`); process.exitCode = 1; });
+  ensureDefaultAutomations().then(() => server.listen(config.port, '0.0.0.0', () => process.stdout.write(`RedBlack Core listening on ${config.port}
+`))).catch(error => { process.stderr.write(`${error.stack ?? error}
+`); process.exitCode = 1; });
   const shutdown = async () => { server.close(); await closeDatabase(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }
