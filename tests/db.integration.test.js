@@ -12,7 +12,7 @@ test('PostgreSQL migrations apply idempotently and install tenant/security contr
     await applyMigrations(db);
     const migrations = await db.query('SELECT version FROM schema_migrations ORDER BY version');
     assert.deepEqual(migrations.rows.map(row => row.version), ['0001_redblack_crm_core.sql', '0002_security_idempotency_and_operations.sql', '0003_automation_parity.sql', '0004_automation_default_backfill.sql', '0005_repair_automation_workspace_name_constraint.sql', '0006_communication_gateway.sql', '0007_voice_ai_call_metadata.sql', '0008_usage_budgets.sql', '0009_control_center_settings.sql',
-      '0010_crm_builder_rules.sql']);
+      '0010_crm_builder_rules.sql', '0011_automation_followup_dedupe.sql']);
     const constraints = await db.query(`SELECT conname FROM pg_constraint WHERE conname = ANY($1::text[])`, [[
       'leads_source_same_workspace_fk', 'lead_pipeline_entries_stage_in_pipeline_fk',
       'tasks_lead_same_workspace_fk', 'automation_runs_version_fk', 'messages_lead_same_workspace_fk'
@@ -62,6 +62,11 @@ test('new lead event runs the default automation and creates exactly one follow-
     await worker.runOne({ ...queued.rows[0], attempt_count: 1, definition: queued.rows[0].definition });
     const tasks = await db.query("SELECT id FROM tasks WHERE workspace_id=$1 AND lead_id=$2 AND source='automation'", [workspaceId, lead.rows[0].id]);
     assert.equal(tasks.rowCount, 1);
+    const duplicate = await db.query(
+      "INSERT INTO tasks(workspace_id,lead_id,assigned_to,created_by,title,status,source) VALUES($1,$2,$3,$3,'First follow-up call','pending','automation') ON CONFLICT DO NOTHING RETURNING id",
+      [workspaceId, lead.rows[0].id, user.rows[0].id]
+    );
+    assert.equal(duplicate.rowCount, 0);
   } finally {
     // The migration intentionally makes automation versions append-only; this test uses an ephemeral CI database.
     await db.end();
