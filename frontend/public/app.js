@@ -253,7 +253,7 @@ function bindPipelineDnD() {
 }
 
 async function renderTasks() {
-  const result = await api(`${workspacePath('tasks')}?limit=100`);
+  const [result, taskTypes] = await Promise.all([api(`${workspacePath('tasks')}?limit=100`), api(workspacePath('task-types'))]);
   appState.taskCache = result.data ?? [];
   const rows = appState.taskCache.map(task => {
     const terminal = ['completed','cancelled'].includes(task.status);
@@ -264,7 +264,7 @@ async function renderTasks() {
   }).join('') || '<tr><td colspan="5" class="empty-state">No tasks found.</td></tr>';
   const canWrite = ['owner','admin','manager','agent'].includes(appState.role);
   setPage(`${pageHeading('FOLLOW-UP WORK', 'Tasks & activities', 'Create, edit, complete, cancel and reopen follow-ups.', canWrite ? '<button class="button button-primary" data-action="toggle-task-form">+ New task</button>' : '')}
-    <section id="taskFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Create a follow-up</h2><button class="text-button" data-action="toggle-task-form">Close</button></div><form id="taskForm" class="panel-body"><div class="field-grid"><label>Lead ID (optional)<input name="leadId" maxlength="36"></label><label>Task type<select name="taskType"><option>CALL</option><option>WHATSAPP</option><option>MEETING</option><option>EMAIL</option><option>OTHER</option></select></label><label class="span-2">Title<input name="title" required maxlength="240"></label><label>Due date<input name="dueAt" type="datetime-local"></label><label>Priority<input name="priority" type="number" value="0" min="0" max="10"></label><label class="span-2">Notes<textarea name="description" maxlength="5000"></textarea></label></div><button class="button button-primary">Save task</button></form></section>
+    <section id="taskFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Create a follow-up</h2><button class="text-button" data-action="toggle-task-form">Close</button></div><form id="taskForm" class="panel-body"><div class="field-grid"><label>Lead ID (optional)<input name="leadId" maxlength="36"></label><label>Task type<select name="taskType">${['CALL','WHATSAPP','MEETING','EMAIL','OTHER',...(taskTypes.data??[]).map(item=>item.name)].filter((value,index,array)=>array.indexOf(value)===index).map(value=>`<option>${escapeHtml(value)}</option>`).join('')}</select></label><label class="span-2">Title<input name="title" required maxlength="240"></label><label>Due date<input name="dueAt" type="datetime-local"></label><label>Priority<input name="priority" type="number" value="0" min="0" max="10"></label><label class="span-2">Notes<textarea name="description" maxlength="5000"></textarea></label></div><button class="button button-primary">Save task</button></form></section>
     <section id="taskEditPanel" class="panel hidden"></section>
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Task queue</h2><p class="panel-subtitle">${fmtNumber(appState.taskCache.length)} records</p></div></div><div class="table-wrap"><table><thead><tr><th>Task</th><th>Due</th><th>Status</th><th>Priority</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
 }
