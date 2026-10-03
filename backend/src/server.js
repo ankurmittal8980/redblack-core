@@ -457,6 +457,21 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           sendJson(response, 200, result.rows[0]); return;
         }
 
+        if (suffix === 'leads/trash' && request.method === 'GET') {
+          requirePermission(context, 'crm:read');
+          const result = await db.query('SELECT l.id, l.first_name, l.last_name, l.company_name, l.email, l.phone, l.status, l.deleted_at, l.updated_at FROM leads l WHERE l.workspace_id=$1 AND l.deleted_at IS NOT NULL ORDER BY l.deleted_at DESC LIMIT 100', [workspaceId]);
+          sendJson(response, 200, { data: result.rows }); return;
+        }
+
+        if (suffix === 'leads/bulk' && request.method === 'POST') {
+          requirePermission(context, 'crm:write'); const input = await body();
+          if (!Array.isArray(input.leadIds) || input.leadIds.length < 1 || input.leadIds.length > 100) throw new ValidationError('leadIds must contain 1 to 100 leads.');
+          const ids = input.leadIds.map(value => uuid(value, 'leadId'));
+          const operation = enumValue(input.operation, 'operation', ['trash', 'restore']);
+          const result = await db.query(operation === 'trash' ? 'UPDATE leads SET deleted_at=COALESCE(deleted_at, now()), updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id' : 'UPDATE leads SET deleted_at=NULL, updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NOT NULL RETURNING id', [workspaceId, ids]);
+          await audit(db, { workspaceId, actorUserId: current.userId, action: `leads.bulk_${operation}`, entityType: 'lead', entityId: null, request, metadata: { count: result.rows.length } });
+          sendJson(response, 200, { updated: result.rows.map(row => row.id), operation }); return;
+        }
         if (suffix === 'leads' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
           const cursor = cursorFor(url); const limit = pageSize(url); const values = [workspaceId]; const filters = ['l.workspace_id = $1', 'l.deleted_at IS NULL'];
