@@ -575,6 +575,13 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.archived', entityType: 'lead', entityId: leadId, request });
             sendJson(response, 200, { id: result.rows[0]?.id, archived: true }); return;
           }
+          if (request.method === 'POST' && action === 'restore') {
+            requirePermission(context, 'crm:write');
+            const result = await db.query('UPDATE leads SET deleted_at = NULL, updated_at = now() WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NOT NULL RETURNING id', [workspaceId, leadId]);
+            if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not in trash.');
+            await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.restored', entityType: 'lead', entityId: leadId, request });
+            sendJson(response, 200, { id: result.rows[0].id, restored: true }); return;
+          }
           if (request.method === 'POST' && action === 'assign') {
             requirePermission(context, 'crm:write'); const input = await body(); const userId = uuid(input.userId, 'userId');
             const assignment = await transaction(db, async client => {
