@@ -163,8 +163,9 @@ async function renderLeads() {
   if (appState.leadStatus) params.set('status', appState.leadStatus);
   const result = await api(`${workspacePath('leads')}?${params}`);
   const createAllowed = ['owner','admin','manager','agent'].includes(appState.role);
-  const action = createAllowed ? '<button class="button button-primary" data-action="toggle-new-lead">+ New lead</button>' : '';
+  const action = createAllowed ? `<div class="heading-actions"><button class="button button-secondary" data-action="toggle-import-leads">Import CSV</button><a class="button button-secondary" href="${workspacePath('leads/export')}">Export CSV</a><button class="button button-primary" data-action="toggle-new-lead">+ New lead</button></div>` : `<a class="button button-secondary" href="${workspacePath('leads/export')}">Export CSV</a>`;
   setPage(`${pageHeading('CRM', 'Leads', 'Find, qualify and follow up with every opportunity.', action)}
+    <section id="leadImportPanel" class="panel hidden"><div class="panel-header"><div><h2 class="panel-title">Import leads</h2><p class="panel-subtitle">CSV columns may include First Name, Last Name, Email, Phone, Company, Project, Opportunity Type, Budget, Location and Status. Duplicates are skipped.</p></div><button class="text-button" data-action="toggle-import-leads">Close</button></div><form id="csvImportForm" class="panel-body"><label>CSV file<input name="file" type="file" accept=".csv,text/csv" required></label><button class="button button-primary">Import</button><div id="csvImportResult"></div></form></section>
     <section id="newLeadPanel" class="panel hidden"><div class="panel-header"><div><h2 class="panel-title">Add a lead</h2><p class="panel-subtitle">Contact details and project context</p></div><button class="text-button" data-action="toggle-new-lead">Close</button></div><form id="newLeadForm" class="panel-body"><div class="field-grid">
       <label>First name<input name="firstName" required maxlength="120"></label><label>Last name<input name="lastName" maxlength="120"></label>
       <label>Email<input name="email" type="email" maxlength="320"></label><label>Phone<input name="phone" type="tel" maxlength="80"></label>
@@ -467,6 +468,7 @@ $('#viewRoot').addEventListener('click', async event => {
   try {
     if (action === 'complete-task') { await api(`${workspacePath(`tasks/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: 'completed' } }); showToast('Task completed.'); await renderView(appState.view); return; }
     if (action === 'toggle-new-lead') $('#newLeadPanel').classList.toggle('hidden');
+    else if (action === 'toggle-import-leads') $('#leadImportPanel')?.classList.toggle('hidden');
     else if (action === 'toggle-lead-edit') $('#leadEditPanel')?.classList.toggle('hidden');
     else if (action === 'new-lead') { renderView('leads'); setTimeout(() => $('#newLeadPanel')?.classList.remove('hidden'), 0); }
     else if (action === 'lead-details') await renderLeadDetail(id);
@@ -548,6 +550,11 @@ $('#viewRoot').addEventListener('submit', async event => {
       const lead = { ...input, budget: input.budget ? Number(input.budget) : null, nextActionAt: input.nextActionAt ? localDateTime(input.nextActionAt) : null };
       Object.keys(lead).forEach(key => { if (lead[key] === '') lead[key] = null; });
       await api(workspacePath('leads'), { method: 'POST', body: lead }); showToast('Lead created.'); appState.cursor = null; await renderLeads();
+    } else if (form.id === 'csvImportForm') {
+      const file = form.elements.file.files?.[0]; if (!file) throw new Error('Choose a CSV file.');
+      const result = await api(workspacePath('leads/import'), { method: 'POST', body: { csv: await file.text() } });
+      $('#csvImportResult').innerHTML = `<div class="notice notice-green">Created ${fmtNumber(result.created)} · skipped duplicates ${fmtNumber(result.skipped)} · errors ${fmtNumber(result.errors?.length ?? 0)}</div>`;
+      appState.cursor = null;
     } else if (form.id === 'taskForm') {
       const task = { ...input, leadId: input.leadId || null, dueAt: input.dueAt ? localDateTime(input.dueAt) : null, priority: Number(input.priority ?? 0) };
       await api(workspacePath('tasks'), { method: 'POST', body: task }); showToast('Follow-up created.'); await renderTasks();
