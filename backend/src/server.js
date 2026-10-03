@@ -697,10 +697,13 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           }
           if (request.method === 'DELETE' && action === 'permanent') {
             requirePermission(context, 'workspace:manage');
-            await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.permanently_deleted', entityType: 'lead', entityId: leadId, request });
-            const result = await db.query('DELETE FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NOT NULL RETURNING id', [workspaceId, leadId]);
-            if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not in trash.');
-            sendJson(response, 200, { id: leadId, deleted: true }); return;
+            const deleted = await transaction(db, async client => {
+              const result = await client.query('DELETE FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NOT NULL RETURNING id', [workspaceId, leadId]);
+              if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not in trash.');
+              await audit(client, { workspaceId, actorUserId: current.userId, action: 'lead.permanently_deleted', entityType: 'lead', entityId: leadId, request });
+              return result.rows[0];
+            });
+            sendJson(response, 200, { id: deleted.id, deleted: true }); return;
           }
           if (request.method === 'POST' && action === 'restore') {
             requirePermission(context, 'crm:write');
