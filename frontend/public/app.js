@@ -362,11 +362,15 @@ $('#viewRoot').addEventListener('click', async event => {
   if (!button) return;
   const { action, id } = button.dataset;
   try {
-    if (action === 'toggle-new-lead') $('#newLeadPanel').classList.toggle('hidden');\n    else if (action === 'toggle-lead-edit') $('#leadEditPanel')?.classList.toggle('hidden');
+    if (action === 'toggle-new-lead') $('#newLeadPanel').classList.toggle('hidden');
+    else if (action === 'toggle-lead-edit') $('#leadEditPanel')?.classList.toggle('hidden');
     else if (action === 'new-lead') { renderView('leads'); setTimeout(() => $('#newLeadPanel')?.classList.remove('hidden'), 0); }
     else if (action === 'lead-details') await renderLeadDetail(id);
     else if (action === 'restore-lead') { await api(`${workspacePath(`leads/${encodeURIComponent(id)}/restore`)}`, { method: 'POST', body: {} }); showToast('Lead restored.'); await renderTrash(); }
-    else if (action === 'select-lead') { if (button.checked) appState.selectedLeads.add(id); else appState.selectedLeads.delete(id); await renderLeads(); }\n    else if (action === 'select-all-leads') { document.querySelectorAll('[data-action="select-lead"]').forEach(input => { input.checked = button.checked; if (button.checked) appState.selectedLeads.add(input.dataset.id); else appState.selectedLeads.delete(input.dataset.id); }); await renderLeads(); }\n    else if (action === 'bulk-trash') { if (!confirm('Move selected leads to Trash?')) return; await api(workspacePath('leads/bulk'), { method: 'POST', body: { leadIds: [...appState.selectedLeads], operation: 'trash' } }); appState.selectedLeads.clear(); showToast('Selected leads moved to Trash.'); await renderLeads(); }\n    else if (action === 'next-leads') { appState.cursor = button.dataset.cursor; await renderLeads(); }
+    else if (action === 'select-lead') { if (button.checked) appState.selectedLeads.add(id); else appState.selectedLeads.delete(id); await renderLeads(); }
+    else if (action === 'select-all-leads') { document.querySelectorAll('[data-action="select-lead"]').forEach(input => { input.checked = button.checked; if (button.checked) appState.selectedLeads.add(input.dataset.id); else appState.selectedLeads.delete(input.dataset.id); }); await renderLeads(); }
+    else if (action === 'bulk-trash') { if (!confirm('Move selected leads to Trash?')) return; await api(workspacePath('leads/bulk'), { method: 'POST', body: { leadIds: [...appState.selectedLeads], operation: 'trash' } }); appState.selectedLeads.clear(); showToast('Selected leads moved to Trash.'); await renderLeads(); }
+    else if (action === 'next-leads') { appState.cursor = button.dataset.cursor; await renderLeads(); }
     else if (action === 'clear-lead-filters') { appState.cursor = null; appState.leadSearch = ''; appState.leadStatus = ''; appState.selectedLeads.clear(); await renderLeads(); }
     else if (action === 'toggle-task-form') $('#taskFormPanel').classList.toggle('hidden');
     else if (action === 'toggle-automation-form') $('#automationFormPanel').classList.toggle('hidden');
@@ -408,7 +412,8 @@ $('#viewRoot').addEventListener('input', event => {
 $('#viewRoot').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.target; const input = formObject(form);
   try {
-    if (form.id === 'leadEditForm') { const leadId = form.dataset.leadId; const payload = { ...input, score: input.score ? Number(input.score) : 0, budget: input.budget ? Number(input.budget) : null }; await api(`${workspacePath(`leads/${encodeURIComponent(leadId)}`)}`, { method: 'PATCH', body: payload }); showToast('Lead updated.'); await renderLeadDetail(leadId);\n    } else if (form.id === 'newLeadForm') {
+    if (form.id === 'leadEditForm') { const leadId = form.dataset.leadId; const payload = { ...input, score: input.score ? Number(input.score) : 0, budget: input.budget ? Number(input.budget) : null }; await api(`${workspacePath(`leads/${encodeURIComponent(leadId)}`)}`, { method: 'PATCH', body: payload }); showToast('Lead updated.'); await renderLeadDetail(leadId);
+    } else if (form.id === 'newLeadForm') {
       const lead = { ...input, budget: input.budget ? Number(input.budget) : null, nextActionAt: input.nextActionAt ? localDateTime(input.nextActionAt) : null };
       Object.keys(lead).forEach(key => { if (lead[key] === '') lead[key] = null; });
       await api(workspacePath('leads'), { method: 'POST', body: lead }); showToast('Lead created.'); appState.cursor = null; await renderLeads();
@@ -423,7 +428,12 @@ $('#viewRoot').addEventListener('submit', async event => {
       delete call.metadataNotes;
       await api(workspacePath('calls'), { method: 'POST', body: call }); showToast('Call record saved.'); await renderCalling();
     } else if (form.id === 'automationForm') {
-      const actionType = input.actionType;\n      const actionConfig = actionType === 'create_task' ? { title: input.actionText } : actionType === 'create_activity' ? { title: input.actionText } : { channel: 'whatsapp', body: input.actionText };\n      let conditionConfig = {}; if (input.conditions) { try { conditionConfig = JSON.parse(input.conditions); } catch { throw new Error('Conditions must be valid JSON.'); } }\n      const actions = []; if (Number(input.waitMinutes || 0) > 0) actions.push({ type: 'wait', config: { minutes: Number(input.waitMinutes) } }); actions.push({ type: actionType, config: actionConfig });\n      const result = await api(workspacePath('automations'), { method: 'POST', body: { name: input.name, description: input.description || null, triggerType: input.triggerType, triggerConfig: conditionConfig, actions, active: form.elements.active.checked } });\n      showToast(`Automation saved as version 1${result.active ? ' and activated' : ''}.`); await renderAutomations();
+      const actionType = input.actionType;
+      const actionConfig = actionType === 'create_task' ? { title: input.actionText } : actionType === 'create_activity' ? { title: input.actionText } : { channel: 'whatsapp', body: input.actionText };
+      let conditionConfig = {}; if (input.conditions) { try { conditionConfig = JSON.parse(input.conditions); } catch { throw new Error('Conditions must be valid JSON.'); } }
+      const actions = []; if (Number(input.waitMinutes || 0) > 0) actions.push({ type: 'wait', config: { minutes: Number(input.waitMinutes) } }); actions.push({ type: actionType, config: actionConfig });
+      const result = await api(workspacePath('automations'), { method: 'POST', body: { name: input.name, description: input.description || null, triggerType: input.triggerType, triggerConfig: conditionConfig, actions, active: form.elements.active.checked } });
+      showToast(`Automation saved as version 1${result.active ? ' and activated' : ''}.`); await renderAutomations();
     } else if (form.id === 'estimateForm') {
       const estimate = await api(workspacePath('usage/estimate'), { method: 'POST', body: { ...input, quantity: Number(input.quantity) } });
       $('#estimateResult').innerHTML = `<div class="notice notice-green">Estimated provider cost: <strong>${fmtMoney(estimate.providerCost, estimate.currency)}</strong> · Customer charge: <strong>${fmtMoney(estimate.customerCharge, estimate.currency)}</strong> · Rate ${escapeHtml(estimate.rateId.slice(0, 8))}</div>`;
