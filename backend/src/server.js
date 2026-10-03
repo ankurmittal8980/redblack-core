@@ -500,13 +500,45 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         if (suffix === 'leads/bulk' && request.method === 'POST') {
           requirePermission(context, 'crm:write'); const input = await body();
           if (!Array.isArray(input.leadIds) || input.leadIds.length < 1 || input.leadIds.length > 100) throw new ValidationError('leadIds must contain 1 to 100 leads.');
-          const ids = input.leadIds.map(value => uuid(value, 'leadId'));
-          if (context.role === 'agent') { const visible = await db.query('SELECT COUNT(*)::int AS count FROM leads l WHERE l.workspace_id=$1 AND l.id=ANY($2::uuid[]) AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL)', [workspaceId, ids, current.userId]); if (visible.rows[0].count !== ids.length) throw new HttpError(403, 'LEAD_SCOPE_FORBIDDEN', 'One or more leads are outside your assignment scope.'); }
-          const operation = enumValue(input.operation, 'operation', ['trash', 'restore', 'status', 'owner']);
-          if (operation === 'restore') { const conflicts = await db.query('SELECT l.id FROM leads l JOIN leads active ON active.workspace_id=l.workspace_id AND active.deleted_at IS NULL AND active.id<>l.id AND ((l.email_normalized IS NOT NULL AND active.email_normalized=l.email_normalized) OR (l.phone_normalized IS NOT NULL AND active.phone_normalized=l.phone_normalized)) WHERE l.workspace_id=$1 AND l.id=ANY($2::uuid[]) AND l.deleted_at IS NOT NULL LIMIT 1', [workspaceId, ids]); if (conflicts.rows[0]) throw new HttpError(409, 'DUPLICATE_LEAD', 'One or more leads conflict with an active email or phone.'); }
-          const status = input.status ? requiredString(input.status, 'status', { max: 80 }) : null; const ownerId = input.ownerId ? uuid(input.ownerId, 'ownerId') : null; if (operation === 'status' && !status) throw new ValidationError('status is required.'); if (operation === 'owner' && !ownerId) throw new ValidationError('ownerId is required.'); const result = await db.query(operation === 'trash' ? 'UPDATE leads SET deleted_at=COALESCE(deleted_at, now()), updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id' : operation === 'restore' ? 'UPDATE leads SET deleted_at=NULL, updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NOT NULL RETURNING id' : operation === 'status' ? 'UPDATE leads SET status=$3, updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id' : 'UPDATE leads SET owner_user_id=$3, updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id', operation === 'status' ? [workspaceId, ids, status] : operation === 'owner' ? [workspaceId, ids, ownerId] : [workspaceId, ids]);
-          await audit(db, { workspaceId, actorUserId: current.userId, action: `leads.bulk_${operation}`, entityType: 'lead', entityId: null, request, metadata: { count: result.rows.length } });
-          sendJson(response, 200, { updated: result.rows.map(row => row.id), operation }); return;
+          const ids = [...new Set(input.leadIds.map(value => uuid(value, 'leadId')))];
+          if (context.role === 'agent') {
+            const visible = await db.query('SELECT COUNT(*)::int AS count FROM leads l WHERE l.workspace_id=$1 AND l.id=ANY($2::uuid[]) AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL)', [workspaceId, ids, current.userId]);
+            if (visible.rows[0].count !== ids.length) throw new HttpError(403, 'LEAD_SCOPE_FORBIDDEN', 'One or more leads are outside your assignment scope.');
+          }
+          const operation = enumValue(input.operation, 'operation', ['trash','restore','status','owner','stage','tags']);
+          if (operation === 'restore') {
+            const conflicts = await db.query('SELECT l.id FROM leads l JOIN leads active ON active.workspace_id=l.workspace_id AND active.deleted_at IS NULL AND active.id<>l.id AND ((l.email_normalized IS NOT NULL AND active.email_normalized=l.email_normalized) OR (l.phone_normalized IS NOT NULL AND active.phone_normalized=l.phone_normalized)) WHERE l.workspace_id=$1 AND l.id=ANY($2::uuid[]) AND l.deleted_at IS NOT NULL LIMIT 1', [workspaceId, ids]);
+            if (conflicts.rows[0]) throw new HttpError(409, 'DUPLICATE_LEAD', 'One or more leads conflict with an active email or phone.');
+          }
+          let updated = [];
+          if (operation === 'stage') {
+            const pipelineId=uuid(input.pipelineId,'pipelineId'); const stageId=uuid(input.stageId,'stageId');
+            const stage=await db.query('SELECT s.id FROM pipeline_stages s JOIN pipelines p ON p.id=s.pipeline_id WHERE p.workspace_id=$1 AND p.id=$2 AND s.id=$3',[workspaceId,pipelineId,stageId]);
+            if(!stage.rows[0]) throw new HttpError(400,'INVALID_STAGE','Stage does not belong to this workspace pipeline.');
+            await transaction(db, async client => {
+              for(const leadId of ids) {
+                const prior=await client.query('SELECT current_stage_id FROM lead_pipeline_entries WHERE workspace_id=$1 AND lead_id=$2 AND pipeline_id=$3 AND is_current=true',[workspaceId,leadId,pipelineId]);
+                await client.query('UPDATE lead_pipeline_entries SET is_current=false,exited_at=now() WHERE workspace_id=$1 AND lead_id=$2 AND pipeline_id=$3 AND is_current=true',[workspaceId,leadId,pipelineId]);
+                await client.query('INSERT INTO lead_pipeline_entries(workspace_id,lead_id,pipeline_id,current_stage_id,is_current) VALUES($1,$2,$3,$4,true)',[workspaceId,leadId,pipelineId,stageId]);
+                await client.query('INSERT INTO lead_stage_history(lead_id,pipeline_id,from_stage_id,to_stage_id,changed_by) VALUES($1,$2,$3,$4,$5)',[leadId,pipelineId,prior.rows[0]?.current_stage_id??null,stageId,current.userId]);
+                await dispatchAutomationEvent(client,{workspaceId,eventType:'lead.stage_changed',leadId,eventId:`bulk-stage:${leadId}:${stageId}`,actorUserId:current.userId,eventData:{pipelineId,fromStageId:prior.rows[0]?.current_stage_id??null,stageId}});
+                updated.push(leadId);
+              }
+            });
+          } else if (operation === 'tags') {
+            const tagIds=[...new Set((input.tagIds??[]).map(value=>uuid(value,'tagId')))];
+            if(tagIds.length){const valid=await db.query('SELECT id FROM tags WHERE workspace_id=$1 AND id=ANY($2::uuid[])',[workspaceId,tagIds]);if(valid.rows.length!==tagIds.length)throw new HttpError(400,'INVALID_TAG','One or more tags are invalid.');}
+            await transaction(db,async client=>{for(const leadId of ids){await client.query('DELETE FROM lead_tags WHERE lead_id=$1',[leadId]);for(const tagId of tagIds)await client.query('INSERT INTO lead_tags(lead_id,tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[leadId,tagId]);updated.push(leadId);}});
+          } else if (operation === 'owner') {
+            const ownerId=uuid(input.ownerId,'ownerId'); const member=await db.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND active=true',[workspaceId,ownerId]); if(!member.rows[0])throw new HttpError(400,'ASSIGNEE_NOT_IN_WORKSPACE','Owner must be an active workspace member.');
+            await transaction(db,async client=>{for(const leadId of ids){await client.query('UPDATE lead_assignments SET unassigned_at=now() WHERE lead_id=$1 AND unassigned_at IS NULL',[leadId]);await client.query('INSERT INTO lead_assignments(workspace_id,lead_id,user_id,assigned_by,reason) VALUES($1,$2,$3,$4,$5)',[workspaceId,leadId,ownerId,current.userId,'Bulk assignment']);await client.query('UPDATE leads SET owner_user_id=$3,updated_at=now() WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL',[workspaceId,leadId,ownerId]);updated.push(leadId);}});
+          } else {
+            const status=input.status?requiredString(input.status,'status',{max:80}):null; if(operation==='status'&&!status)throw new ValidationError('status is required.');
+            const result=await db.query(operation==='trash'?'UPDATE leads SET deleted_at=COALESCE(deleted_at,now()),updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id':operation==='restore'?'UPDATE leads SET deleted_at=NULL,updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NOT NULL RETURNING id':'UPDATE leads SET status=$3,updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id',operation==='status'?[workspaceId,ids,status]:[workspaceId,ids]);
+            updated=result.rows.map(row=>row.id);
+          }
+          await audit(db,{workspaceId,actorUserId:current.userId,action:`leads.bulk_${operation}`,entityType:'lead',entityId:null,request,metadata:{count:updated.length}});
+          sendJson(response,200,{updated,operation}); return;
         }
         if (suffix === 'leads/export' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
