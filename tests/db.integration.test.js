@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -68,3 +69,55 @@ test('new lead event runs the default automation and creates exactly one follow-
 });
 
 
+
+
+test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !databaseUrl }, async () => {
+  process.env.DATABASE_URL = databaseUrl;
+  process.env.APP_ENV = 'test';
+  const [{ Pool }, { createRedBlackServer }, { createSession }] = await Promise.all([
+    import('pg'), import('../backend/src/server.js'), import('../backend/src/auth.js')
+  ]);
+  const db = new Pool({ connectionString: databaseUrl });
+  const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
+  const workspaceA = (await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', ['Bulk API A', `bulk-api-a-${suffix}`])).rows[0].id;
+  const workspaceB = (await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', ['Bulk API B', `bulk-api-b-${suffix}`])).rows[0].id;
+  const userId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`bulk-api-${suffix}@example.com`, 'Bulk API Owner'])).rows[0].id;
+  await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceA, userId]);
+  const leadA = (await db.query("INSERT INTO leads(workspace_id,first_name) VALUES($1,'Workspace A Lead') RETURNING id", [workspaceA])).rows[0].id;
+  const leadB = (await db.query("INSERT INTO leads(workspace_id,first_name) VALUES($1,'Workspace B Lead') RETURNING id", [workspaceB])).rows[0].id;
+  const oldTag = (await db.query("INSERT INTO tags(workspace_id,name) VALUES($1,'Old') RETURNING id", [workspaceA])).rows[0].id;
+  const newTag = (await db.query("INSERT INTO tags(workspace_id,name) VALUES($1,'New') RETURNING id", [workspaceA])).rows[0].id;
+  await db.query('INSERT INTO lead_tags(workspace_id,lead_id,tag_id) VALUES($1,$2,$3)', [workspaceA, leadA, oldTag]);
+  const pipelineId = (await db.query("INSERT INTO pipelines(workspace_id,name,slug) VALUES($1,'Bulk','bulk') RETURNING id", [workspaceA])).rows[0].id;
+  const stageId = (await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'Qualified','qualified',1) RETURNING id", [pipelineId])).rows[0].id;
+  const session = await createSession(db, { userId, workspaceId: workspaceA });
+  const server = createRedBlackServer({ db });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const endpoint = `http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/leads/bulk`;
+  const headers = {
+    'content-type': 'application/json',
+    cookie: `rb_session=${encodeURIComponent(session.token)}; rb_csrf=${encodeURIComponent(session.csrf)}`,
+    'x-csrf-token': session.csrf
+  };
+  const bulk = body => fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
+  try {
+    const crossWorkspace = await bulk({ operation: 'tags', leadIds: [leadA, leadB], tagIds: [] });
+    assert.equal(crossWorkspace.status, 404);
+    const untouched = await db.query('SELECT tag_id FROM lead_tags WHERE workspace_id=$1 AND lead_id=$2', [workspaceA, leadA]);
+    assert.deepEqual(untouched.rows.map(row => row.tag_id), [oldTag]);
+
+    const tagged = await bulk({ operation: 'tags', leadIds: [leadA], tagIds: [newTag] });
+    assert.equal(tagged.status, 200, await tagged.text());
+    const tags = await db.query('SELECT workspace_id,tag_id FROM lead_tags WHERE lead_id=$1', [leadA]);
+    assert.deepEqual(tags.rows, [{ workspace_id: workspaceA, tag_id: newTag }]);
+
+    const staged = await bulk({ operation: 'stage', leadIds: [leadA], pipelineId, stageId });
+    assert.equal(staged.status, 200, await staged.text());
+    const history = await db.query('SELECT workspace_id,pipeline_id,to_stage_id FROM lead_stage_history WHERE lead_id=$1 ORDER BY changed_at DESC LIMIT 1', [leadA]);
+    assert.deepEqual(history.rows[0], { workspace_id: workspaceA, pipeline_id: pipelineId, to_stage_id: stageId });
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await db.end();
+  }
+});
