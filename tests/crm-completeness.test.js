@@ -36,7 +36,36 @@ test('CRM daily workspace and builder contracts are present', () => {
   assert.match(app, /leadEditForm/);
   assert.match(app, /select-all-leads/);
   assert.match(app, /Conditions JSON/);
-  assert.match(app, /waitMinutes/);
+  assert.match(app, /automationSteps/);
+  assert.match(app, /data-automation-step/);
+  assert.match(app, /dragstart/);
+  assert.match(app, /automation-runs/);
   assert.match(server, /operation === 'status'/);
   assert.match(server, /operation === 'owner'/);
+});
+
+
+test('CRM builder exposes custom fields, tags, meetings and import/export', () => {
+  assert.match(server, /lead_custom_fields/);
+  assert.match(server, /lead_tags/);
+  assert.match(server, /leads\/import/);
+  assert.match(server, /leads\/export/);
+  assert.match(app, /customFieldForm/);
+  assert.match(app, /tagForm/);
+  assert.match(app, /async function renderMeetings/);
+  assert.match(app, /csvImportForm/);
+});
+
+test('pipeline board uses persisted stage state and drag drop movement', () => {
+  assert.match(server, /current_stage_id/);
+  assert.match(app, /data-drag-lead/);
+  assert.match(app, /data-drop-stage/);
+  assert.match(app, /bindPipelineDnD/);
+});
+
+test('automation conditions support nested all-any comparisons', () => {
+  assert.match(server, /function automationCondition/);
+  assert.match(server, /Array\.isArray\(node\.all\)/);
+  assert.match(server, /Array\.isArray\(node\.any\)/);
+  assert.match(server, /operator === '>='/);
 });
