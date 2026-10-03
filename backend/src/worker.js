@@ -1,6 +1,9 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pool, transaction, closeDatabase } from './db.js';
+import { communications } from './providers.js';
+import { CommunicationGateway } from './communication-gateway.js';
+const communicationGateway = new CommunicationGateway({ db: pool, registry: communications });
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
@@ -37,25 +40,6 @@ function matchesTrigger(config, event) {
   return true;
 }
 
-function getPath(value, path) { return String(path).split('.').reduce((current, key) => current == null ? undefined : current[key], value); }
-function compare(actual, operator, expected) {
-  if (operator === 'eq' || operator === '=') return actual === expected;
-  if (operator === 'neq' || operator === '!=') return actual !== expected;
-  if (operator === 'gte' || operator === '>=') return Number(actual) >= Number(expected);
-  if (operator === 'gt' || operator === '>') return Number(actual) > Number(expected);
-  if (operator === 'lte' || operator === '<=') return Number(actual) <= Number(expected);
-  if (operator === 'lt' || operator === '<') return Number(actual) < Number(expected);
-  if (operator === 'contains') return Array.isArray(actual) ? actual.includes(expected) : String(actual ?? '').includes(String(expected));
-  return false;
-}
-function conditionsMatch(condition, data) {
-  if (!condition) return true;
-  if (Array.isArray(condition.all)) return condition.all.every(item => conditionsMatch(item, data));
-  if (Array.isArray(condition.any)) return condition.any.some(item => conditionsMatch(item, data));
-  if (condition.field) return compare(getPath(data, condition.field), condition.operator ?? 'eq', condition.value);
-  return true;
-}
-
 async function enqueueStageAutomations(client, run, { pipelineId, fromStageId, stageId }) {
   const candidates = await client.query(
     `SELECT id, current_version_id, trigger_config FROM automations
@@ -84,37 +68,6 @@ async function executeAction(run, action, position) {
     if (prior.rows[0]?.status === 'completed') return;
     await client.query("UPDATE automation_action_runs SET status='pending', result='{}'::jsonb WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3", [run.workspace_id, run.id, position]);
     let result = {};
-    if (action.condition && !conditionsMatch(action.condition, run.metadata?.eventData ?? {})) {
-      result = { skipped: true, reason: 'condition_not_met' };
-    } else if (action.type === 'create_lead') {
-      const lead = await client.query('INSERT INTO leads(workspace_id, first_name, last_name, email, phone, status) VALUES($1,$2,$3,$4,$5,$6) RETURNING id', [run.workspace_id, config.firstName ?? 'New', config.lastName ?? null, config.email ?? null, config.phone ?? null, config.status ?? 'New Lead']);
-      result = { leadId: lead.rows[0].id };
-    } else if (action.type === 'update_lead') {
-      const fields = ['first_name','last_name','email','phone','status','score','consent'].filter(field => config[field] !== undefined);
-      if (!fields.length) throw new Error('update_lead requires at least one supported field.');
-      const values = fields.map(field => config[field]);
-      const set = fields.map((field, index) => `${field}=$${index + 3}`).join(', ');
-      await client.query(`UPDATE leads SET ${set}, updated_at=now() WHERE workspace_id=$1 AND id=$2`, [run.workspace_id, run.lead_id, ...values]);
-      result = { updated: fields };
-    } else if (action.type === 'assign_owner') {
-      const owner = await client.query("SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND role IN ('owner','admin','manager') AND active=true ORDER BY joined_at LIMIT 1", [run.workspace_id]);
-      if (!owner.rows[0]) throw new Error('No active owner is available.');
-      await client.query("INSERT INTO lead_assignments(workspace_id,lead_id,user_id,assigned_by) VALUES($1,$2,$3,NULL) ON CONFLICT DO NOTHING", [run.workspace_id, run.lead_id, owner.rows[0].user_id]);
-      result = { assignedTo: owner.rows[0].user_id };
-    } else if (action.type === 'create_note') {
-      const note = await client.query("INSERT INTO activities(workspace_id,lead_id,user_id,type,title,body,metadata) VALUES($1,$2,NULL,'note',$3,$4,$5::jsonb) RETURNING id", [run.workspace_id, run.lead_id, config.title ?? 'Automation note', config.body ?? '', JSON.stringify({ automationRunId: run.id })]);
-      result = { activityId: note.rows[0].id };
-    } else if (action.type === 'notify_user') {
-      result = { notified: true, userId: config.userId ?? run.metadata?.requestedBy ?? null };
-    } else if (action.type === 'schedule_follow_up') {
-      const task = await client.query("INSERT INTO tasks(workspace_id,lead_id,title,due_at,status,source,task_type) VALUES($1,$2,$3,now()+($4::text || ' minutes')::interval,'pending','automation','follow_up') RETURNING id", [run.workspace_id, run.lead_id, config.title ?? 'Scheduled follow-up', String(config.dueInMinutes ?? 60)]);
-      result = { taskId: task.rows[0].id };
-    } else if (action.type === 'wait') {
-      await client.query("UPDATE automation_runs SET status='queued', resume_at=now()+($2::text || ' minutes')::interval WHERE id=$1", [run.id, String(config.minutes ?? 0)]);
-      result = { resumedAt: `in ${config.minutes ?? 0} minutes` };
-    } else if (action.type === 'invoke_ai' || action.type === 'call_webhook' || action.type === 'send_communication' || action.type === 'book_appointment') {
-      throw new Error(`${action.type} requires an external adapter integration and is deferred until that adapter is configured.`);
-    } else
     if (action.type === 'wait') {
       await client.query("UPDATE automation_runs SET status='queued', resume_at=now()+($2::text || ' minutes')::interval WHERE id=$1", [run.id, String(config.minutes ?? 0)]);
       result = { resumedAt: `in ${config.minutes ?? 0} minutes` };
@@ -160,6 +113,9 @@ async function executeAction(run, action, position) {
         [run.workspace_id, run.lead_id, config.channel, config.subject ?? null, config.body, `automation:${run.id}:${position}`, JSON.stringify({ automationRunId: run.id, suppressed: lead.rows[0].do_not_contact })]
       );
       result = { messageId: message.rows[0]?.id ?? null, draftOnly: true, suppressed: lead.rows[0].do_not_contact };
+    } else if (action.type === 'send_communication') {
+      const sent = await communicationGateway.send({ workspaceId: run.workspace_id, leadId: run.lead_id, channel: config.channel, provider: config.provider, to: config.to, subject: config.subject, body: config.body, idempotencyKey: `automation:${run.id}:${position}`, metadata: { automationRunId: run.id } });
+      result = { messageId: sent.message.id, duplicate: sent.duplicate };
     } else throw new Error('Automation action type is not supported.');
 
     await client.query(
