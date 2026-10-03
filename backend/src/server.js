@@ -600,6 +600,8 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             }
             await client.query(`INSERT INTO activities(workspace_id, lead_id, user_id, type, title, body) VALUES($1,$2,$3,'system','Lead created','Lead created from CRM.')`, [workspaceId, lead.id, current.userId]);
             await audit(client, { workspaceId, actorUserId: current.userId, action: 'lead.created', entityType: 'lead', entityId: lead.id, request });
+            const ruleResult = await applyLeadRules(client, { workspaceId, leadId: lead.id, actorUserId: current.userId });
+            if (ruleResult.scoreChanged) await dispatchAutomationEvent(client, { workspaceId, eventType: 'lead.score_changed', leadId: lead.id, eventId: `lead-score:${lead.id}:${Date.now()}`, actorUserId: current.userId });
             await dispatchAutomationEvent(client, { workspaceId, eventType: 'lead.created', leadId: lead.id, eventId: `lead-created:${lead.id}`, actorUserId: current.userId });
             return lead;
           });
@@ -682,6 +684,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
               for (const tagId of tagIds) await db.query('INSERT INTO lead_tags(lead_id,tag_id) VALUES($1,$2) ON CONFLICT DO NOTHING', [leadId, tagId]);
             }
             await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.updated', entityType: 'lead', entityId: leadId, request, metadata: { fields: [...updates.keys()], customFields: hasCustomFields, tags: hasTags } });
+            const ruleResult = await applyLeadRules(db, { workspaceId, leadId, actorUserId: current.userId });
+            await dispatchAutomationEvent(db, { workspaceId, eventType: 'lead.updated', leadId, eventId: `lead-updated:${leadId}:${Date.now()}`, actorUserId: current.userId, eventData: { fields: [...updates.keys()] } });
+            if (ruleResult.scoreChanged) await dispatchAutomationEvent(db, { workspaceId, eventType: 'lead.score_changed', leadId, eventId: `lead-score:${leadId}:${Date.now()}`, actorUserId: current.userId });
             sendJson(response, 200, result.rows[0]); return;
           }
           if (request.method === 'DELETE' && !action) {
@@ -1460,6 +1465,42 @@ function automationMatches(config, event) {
   if (config.status && config.status !== event.status) return false;
   if (config.all || config.any || (config.field && config.operator)) return automationCondition(config, event);
   return true;
+}
+
+async function applyLeadRules(db, { workspaceId, leadId, actorUserId = null }) {
+  const leadResult = await db.query('SELECT * FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
+  const lead = leadResult.rows[0]; if (!lead) return { scoreChanged: false };
+  const context = { ...lead, sourceId: lead.source_id, ownerId: lead.owner_user_id, opportunityType: lead.opportunity_type, brandProject: lead.brand_project };
+  const scoring = await db.query('SELECT conditions,score_delta FROM crm_scoring_rules WHERE workspace_id=$1 AND active=true ORDER BY priority,id', [workspaceId]);
+  let scoreChanged = false;
+  if (scoring.rows.length) {
+    const calculated = scoring.rows.reduce((total, rule) => total + (automationCondition(rule.conditions ?? {}, context) ? Number(rule.score_delta) : 0), 0);
+    const nextScore = Math.max(0, calculated);
+    if (nextScore !== Number(lead.score)) { await db.query('UPDATE leads SET score=$3,updated_at=now() WHERE workspace_id=$1 AND id=$2', [workspaceId, leadId, nextScore]); context.score = nextScore; scoreChanged = true; }
+  }
+  const existing = await db.query('SELECT 1 FROM lead_assignments WHERE lead_id=$1 AND unassigned_at IS NULL', [leadId]);
+  if (!existing.rows[0]) {
+    const rules = await db.query('SELECT * FROM crm_assignment_rules WHERE workspace_id=$1 AND active=true ORDER BY priority,id', [workspaceId]);
+    const rule = rules.rows.find(item => automationCondition(item.conditions ?? {}, context));
+    if (rule && rule.strategy !== 'unassigned') {
+      let userId = rule.config?.userId ?? null;
+      if (rule.strategy === 'round_robin') {
+        const candidate = await db.query(`SELECT wm.user_id,COUNT(a.id)::int AS load FROM workspace_members wm
+          LEFT JOIN lead_assignments a ON a.user_id=wm.user_id AND a.unassigned_at IS NULL
+          WHERE wm.workspace_id=$1 AND wm.active=true AND wm.role IN ('agent','manager')
+          GROUP BY wm.user_id ORDER BY load,wm.user_id LIMIT 1`, [workspaceId]);
+        userId = candidate.rows[0]?.user_id ?? null;
+      }
+      if (userId) {
+        const member = await db.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND active=true', [workspaceId,userId]);
+        if (member.rows[0]) {
+          await db.query('INSERT INTO lead_assignments(workspace_id,lead_id,user_id,assigned_by,reason) VALUES($1,$2,$3,$4,$5)', [workspaceId,leadId,userId,actorUserId,`Rule: ${rule.name}`]);
+          await db.query('UPDATE leads SET owner_user_id=$3,updated_at=now() WHERE workspace_id=$1 AND id=$2', [workspaceId,leadId,userId]);
+        }
+      }
+    }
+  }
+  return { scoreChanged };
 }
 
 export async function dispatchAutomationEvent(db, { workspaceId, eventType, leadId, eventId, actorUserId = null, eventData = {} }) {
