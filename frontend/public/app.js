@@ -208,7 +208,7 @@ async function renderPipelines() {
   const cards = (leads.data ?? []).map(lead => ({ lead, current: null }));
   if (first) {
     const board = first.stages.map(stage => {
-      const matching = cards.filter(({ lead }) => (lead.status || '').toLowerCase() === stage.name.toLowerCase() || (stage.slug === 'new-lead' && (lead.status || '').toLowerCase() === 'new lead'));
+      const matching = cards.filter(({ lead }) => lead.current_stage_id ? lead.current_stage_id === stage.id : ((lead.status || '').toLowerCase() === stage.name.toLowerCase() || (stage.slug === 'new-lead' && (lead.status || '').toLowerCase() === 'new lead')));
       return `<div class="pipeline-column" data-drop-stage="${escapeHtml(stage.id)}" data-drop-pipeline="${escapeHtml(first.id)}"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(({ lead }) => `<article class="pipeline-card" draggable="true" data-drag-lead="${escapeHtml(lead.id)}"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(first.id)}"><option value="">Move to stage…</option>${first.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
     }).join('');
     setPage(`${pageHeading('OPPORTUNITY FLOW', 'Pipelines', 'Move every opportunity forward with a clear next step.')}
@@ -223,7 +223,7 @@ async function renderPipelineChoice(all, pipelineId) {
   if (!pipeline) return;
   const leads = await api(`${workspacePath('leads')}?pipelineId=${encodeURIComponent(pipelineId)}&limit=100`);
   const board = pipeline.stages.map(stage => {
-    const matching = (leads.data ?? []).filter(lead => (lead.status || '').toLowerCase() === stage.name.toLowerCase() || (stage.slug === 'new-lead' && (lead.status || '').toLowerCase() === 'new lead'));
+    const matching = (leads.data ?? []).filter(lead => lead.current_stage_id ? lead.current_stage_id === stage.id : ((lead.status || '').toLowerCase() === stage.name.toLowerCase() || (stage.slug === 'new-lead' && (lead.status || '').toLowerCase() === 'new lead')));
     return `<div class="pipeline-column" data-drop-stage="${escapeHtml(stage.id)}" data-drop-pipeline="${escapeHtml(pipeline.id)}"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(lead => `<article class="pipeline-card" draggable="true" data-drag-lead="${escapeHtml(lead.id)}"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(pipeline.id)}"><option value="">Move to stage…</option>${pipeline.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
   }).join('');
   $('.pipeline-board').innerHTML = board;
