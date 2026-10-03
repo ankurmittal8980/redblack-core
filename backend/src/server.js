@@ -1227,6 +1227,24 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             const result = await queueAutomationRun(db, { workspaceId, automationId, leadId: input.leadId ? uuid(input.leadId, 'leadId') : null, idempotencyKey: `test:${key}`, actorUserId: current.userId, test: true });
             sendJson(response, 202, result); return;
           }
+          const runDetailMatch = action.match(/^runs\/([^/]+)$/);
+          if (request.method === 'GET' && runDetailMatch) {
+            const runId = uuid(runDetailMatch[1], 'runId');
+            const run = await db.query(
+              `SELECT r.id,r.lead_id,r.version_id,r.status,r.started_at,r.completed_at,r.error_message,r.attempt_count,r.created_at,
+                      v.version_number,v.definition
+                 FROM automation_runs r
+                 JOIN automation_versions v ON v.workspace_id=r.workspace_id AND v.id=r.version_id
+                WHERE r.workspace_id=$1 AND r.automation_id=$2 AND r.id=$3`,
+              [workspaceId, automationId, runId]
+            );
+            if (!run.rows[0]) throw new HttpError(404, 'AUTOMATION_RUN_NOT_FOUND', 'Automation run was not found.');
+            const steps = await db.query(
+              'SELECT id,position,status,result,completed_at FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 ORDER BY position',
+              [workspaceId, runId]
+            );
+            sendJson(response, 200, { run: run.rows[0], steps: steps.rows }); return;
+          }
           if (request.method === 'GET' && action === 'runs') {
             const result = await db.query('SELECT id, lead_id, version_id, status, started_at, completed_at, error_message, attempt_count, created_at FROM automation_runs WHERE workspace_id=$1 AND automation_id=$2 ORDER BY created_at DESC LIMIT $3', [workspaceId, automationId, pageSize(url)]);
             sendJson(response, 200, { data: result.rows }); return;
