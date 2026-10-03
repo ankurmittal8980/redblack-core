@@ -1253,8 +1253,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
       throw new HttpError(404, 'NOT_FOUND', 'Route was not found.');
     } catch (error) {
       const safe = userSafeError(error);
-      if (safe.status >= 500) process.stderr.write(JSON.stringify({ level: 'error', requestId, message: error.message, code: error.code ?? null }) + '
-');
+      if (safe.status >= 500) process.stderr.write(JSON.stringify({ level: 'error', requestId, message: error.message, code: error.code ?? null }) + '\n');
       if (!response.headersSent) sendJson(response, safe.status, { error: { code: safe.code, message: safe.message, requestId } });
       else response.destroy();
     }
