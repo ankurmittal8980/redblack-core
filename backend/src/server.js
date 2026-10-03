@@ -1364,11 +1364,42 @@ async function queueAutomationRun(db, { workspaceId, automationId, leadId, idemp
   throw new HttpError(404, 'AUTOMATION_NOT_ACTIVE', 'Automation is unavailable or inactive.');
 }
 
+function automationValue(source, path) {
+  return String(path ?? '').split('.').filter(Boolean).reduce((value, key) => value == null ? undefined : value[key], source);
+}
+
+function automationCompare(actual, operator, expected) {
+  if (operator === 'is empty') return actual === undefined || actual === null || actual === '';
+  if (operator === 'is not empty') return !(actual === undefined || actual === null || actual === '');
+  if (operator === 'contains') return Array.isArray(actual) ? actual.includes(expected) : String(actual ?? '').includes(String(expected ?? ''));
+  if (operator === 'does not contain') return Array.isArray(actual) ? !actual.includes(expected) : !String(actual ?? '').includes(String(expected ?? ''));
+  if (operator === 'in') return Array.isArray(expected) && expected.includes(actual);
+  if (operator === 'not in') return Array.isArray(expected) && !expected.includes(actual);
+  if (operator === '=') return actual === expected || String(actual ?? '') === String(expected ?? '');
+  if (operator === '!=') return !(actual === expected || String(actual ?? '') === String(expected ?? ''));
+  const left = Number(actual); const right = Number(expected);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+  if (operator === '>') return left > right;
+  if (operator === '>=') return left >= right;
+  if (operator === '<') return left < right;
+  if (operator === '<=') return left <= right;
+  return false;
+}
+
+function automationCondition(node, event) {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return true;
+  if (Array.isArray(node.all)) return node.all.every(item => automationCondition(item, event));
+  if (Array.isArray(node.any)) return node.any.some(item => automationCondition(item, event));
+  if (node.field && node.operator) return automationCompare(automationValue(event, node.field), String(node.operator).toLowerCase(), node.value);
+  return true;
+}
+
 function automationMatches(config, event) {
   if (config.pipelineId && config.pipelineId !== event.pipelineId) return false;
   if (config.fromStageId && config.fromStageId !== event.fromStageId) return false;
   if (config.toStageId && config.toStageId !== event.stageId) return false;
   if (config.status && config.status !== event.status) return false;
+  if (config.all || config.any || (config.field && config.operator)) return automationCondition(config, event);
   return true;
 }
 
@@ -1377,8 +1408,13 @@ export async function dispatchAutomationEvent(db, { workspaceId, eventType, lead
     `SELECT id, trigger_config FROM automations WHERE workspace_id=$1 AND active=true AND trigger_type=$2 ORDER BY created_at`,
     [workspaceId, eventType]
   );
+  let leadContext = {};
+  if (leadId) {
+    const lead = await db.query('SELECT status,score,temperature,budget,source_id,owner_user_id,location,opportunity_type,brand_project FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
+    if (lead.rows[0]) leadContext = { ...lead.rows[0], sourceId: lead.rows[0].source_id, ownerId: lead.rows[0].owner_user_id, opportunityType: lead.rows[0].opportunity_type, brandProject: lead.rows[0].brand_project };
+  }
   for (const automation of automations.rows) {
-    if (!automationMatches(automation.trigger_config ?? {}, eventData)) continue;
+    if (!automationMatches(automation.trigger_config ?? {}, { ...leadContext, ...eventData })) continue;
     await queueAutomationRun(db, {
       workspaceId,
       automationId: automation.id,
