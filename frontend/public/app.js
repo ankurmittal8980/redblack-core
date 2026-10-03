@@ -300,11 +300,18 @@ async function renderReports() {
 }
 
 async function renderWorkspace() {
-  const [workspace, members] = await Promise.all([api(workspacePath()), api(`${workspacePath('members')}`)]);
+  const [workspace, members, fields, tags] = await Promise.all([
+    api(workspacePath()), api(workspacePath('members')), api(`${workspacePath('custom-fields')}?entityType=lead`), api(workspacePath('tags'))
+  ]);
   const canManage = ['owner','admin'].includes(appState.role);
-  setPage(`${pageHeading('TEAM SETTINGS', 'Workspace', 'Manage the team boundary, access roles and operating defaults.')}
+  const fieldRows = (fields.data ?? []).map(field => `<tr><td>${escapeHtml(field.label)}</td><td><code>${escapeHtml(field.field_key)}</code></td><td>${badge(field.field_type)}</td><td>${field.required ? 'Required' : 'Optional'}</td><td>${canManage ? `<button class="quiet-button" data-action="field-required" data-required="${field.required ? 'false' : 'true'}" data-id="${escapeHtml(field.id)}">${field.required ? 'Make optional' : 'Make required'}</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty-state">No custom lead fields configured.</td></tr>';
+  const tagRows = (tags.data ?? []).map(tag => `<span class="badge">${escapeHtml(tag.name)}</span>`).join(' ') || '<span class="muted">No tags configured.</span>';
+  setPage(`${pageHeading('CRM BUILDER', 'Workspace', 'Configure the team boundary, CRM fields, tags and operating defaults without rebuilding the application.')}
     <section class="panel"><div class="panel-header"><h2 class="panel-title">Workspace profile</h2><span class="badge">${escapeHtml(appState.role)}</span></div><div class="panel-body"><dl class="key-value"><dt>Name</dt><dd>${escapeHtml(workspace.name)}</dd><dt>Workspace slug</dt><dd>${escapeHtml(workspace.slug)}</dd><dt>Timezone</dt><dd>${escapeHtml(workspace.timezone)}</dd><dt>Currency</dt><dd>${escapeHtml(workspace.currency)}</dd></dl></div></section>
     ${canManage ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Update workspace</h2></div><form id="workspaceForm" class="panel-body"><div class="inline-form"><label>Workspace name<input name="name" value="${escapeHtml(workspace.name)}" required maxlength="120"></label><label>Timezone<input name="timezone" value="${escapeHtml(workspace.timezone)}" required maxlength="80"></label><label>Currency<input name="currency" value="${escapeHtml(workspace.currency)}" minlength="3" maxlength="3" required></label><button class="button button-primary">Save settings</button></div></form></section>` : ''}
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Lead fields</h2><p class="panel-subtitle">Workspace-scoped custom field definitions</p></div></div><div class="table-wrap"><table><thead><tr><th>Label</th><th>Key</th><th>Type</th><th>Requirement</th><th></th></tr></thead><tbody>${fieldRows}</tbody></table></div>
+      ${canManage ? `<form id="customFieldForm" class="panel-body"><div class="inline-form"><label>Label<input name="label" required maxlength="160"></label><label>Key<input name="fieldKey" required maxlength="80" pattern="[A-Za-z0-9_]+"></label><label>Type<select name="fieldType"><option>text</option><option>textarea</option><option>number</option><option>currency</option><option>date</option><option>datetime</option><option>boolean</option><option>select</option><option>multiselect</option><option>email</option><option>phone</option><option>url</option></select></label><label class="checkbox-row"><input name="required" type="checkbox" class="checkbox-input"> Required</label><button class="button button-primary">Add field</button></div></form>` : ''}</section>
+    <section class="panel"><div class="panel-header"><h2 class="panel-title">Tags</h2></div><div class="panel-body"><div class="heading-actions">${tagRows}</div>${canManage ? `<form id="tagForm" class="inline-form"><label>New tag<input name="name" required maxlength="80"></label><button class="button button-primary">Add tag</button></form>` : ''}</div></section>
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Members</h2><p class="panel-subtitle">${fmtNumber(members.data?.length ?? 0)} active and invited users</p></div></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>${(members.data ?? []).map(member => `<tr><td>${escapeHtml(member.display_name)}</td><td>${escapeHtml(member.email)}</td><td>${badge(member.role)}</td><td>${badge(member.active ? 'active' : 'inactive')}</td></tr>`).join('')}</tbody></table></div></section>
     ${canManage ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Add a team member</h2></div><form id="memberForm" class="panel-body"><div class="field-grid"><label>Name<input name="displayName" required maxlength="120"></label><label>Email<input name="email" type="email" required maxlength="320"></label><label>Initial password<input name="initialPassword" type="password" required minlength="12" maxlength="1024"></label><label>Role<select name="role"><option>agent</option><option>manager</option><option>reporting</option><option>admin</option><option>service</option></select></label></div><p class="muted small">Share the initial password with the member through your normal secure process. Email delivery is not enabled.</p><button class="button button-primary">Create member</button></form></section>` : ''}`);
 }
@@ -408,6 +415,7 @@ $('#viewRoot').addEventListener('click', async event => {
     else if (action === 'close-task-edit') $('#taskEditPanel')?.classList.add('hidden');
     else if (action === 'task-status') { await api(`${workspacePath(`tasks/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: button.dataset.status } }); showToast('Task status updated.'); await renderTasks(); }
     else if (action === 'meeting-status') { await api(`${workspacePath(`meetings/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: button.dataset.status } }); showToast('Meeting updated.'); await renderMeetings(); }
+    else if (action === 'field-required') { await api(`${workspacePath(`custom-fields/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { required: button.dataset.required === 'true' } }); showToast('Field settings updated.'); await renderWorkspace(); }
     else if (action === 'toggle-automation-form') $('#automationFormPanel').classList.toggle('hidden');
     else if (action === 'reload-view') await renderView(appState.view);
     else if (action === 'run-automation') {
@@ -484,6 +492,11 @@ $('#viewRoot').addEventListener('submit', async event => {
       await api(workspacePath('usage/rates'), { method: 'POST', body: rate }); showToast('Rate version published.'); await renderUsage();
     } else if (form.id === 'workspaceForm') {
       await api(workspacePath(), { method: 'PATCH', body: input }); showToast('Workspace updated.'); await renderWorkspace();
+    } else if (form.id === 'customFieldForm') {
+      await api(workspacePath('custom-fields'), { method: 'POST', body: { entityType: 'lead', fieldKey: input.fieldKey, label: input.label, fieldType: input.fieldType, required: form.elements.required.checked, config: {} } });
+      showToast('Custom field added.'); await renderWorkspace();
+    } else if (form.id === 'tagForm') {
+      await api(workspacePath('tags'), { method: 'POST', body: { name: input.name } }); showToast('Tag added.'); await renderWorkspace();
     } else if (form.id === 'memberForm') {
       await api(workspacePath('members'), { method: 'POST', body: input }); showToast('Member created.'); await renderWorkspace();
     }
