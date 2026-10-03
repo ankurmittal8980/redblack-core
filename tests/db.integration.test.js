@@ -96,6 +96,7 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   const pipelineId = (await db.query("INSERT INTO pipelines(workspace_id,name,slug) VALUES($1,'Bulk','bulk') RETURNING id", [workspaceA])).rows[0].id;
   const stageId = (await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'Qualified','qualified',1) RETURNING id", [pipelineId])).rows[0].id;
   const secondStageId = (await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'Proposal','proposal',2) RETURNING id", [pipelineId])).rows[0].id;
+  const requiredFieldId = (await db.query("INSERT INTO custom_field_definitions(workspace_id,entity_type,field_key,label,field_type,required,config) VALUES($1,'lead','segment','Segment','text',true,'{}'::jsonb) RETURNING id", [workspaceA])).rows[0].id;
   const session = await createSession(db, { userId, workspaceId: workspaceA });
   const server = createRedBlackServer({ db });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -108,6 +109,21 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   };
   const bulk = body => fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
   try {
+    const createEndpoint = `http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/leads`;
+    const missingRequired = await fetch(createEndpoint, { method:'POST', headers, body:JSON.stringify({ firstName:'Missing Required' }) });
+    assert.equal(missingRequired.status, 400);
+    const rolledBack = await db.query("SELECT 1 FROM leads WHERE workspace_id=$1 AND first_name='Missing Required'", [workspaceA]);
+    assert.equal(rolledBack.rowCount, 0);
+
+    const createdLeadResponse = await fetch(createEndpoint, { method:'POST', headers, body:JSON.stringify({ firstName:'Configured Lead', customFields:{ [requiredFieldId]:'Enterprise' }, tagIds:[newTag] }) });
+    assert.equal(createdLeadResponse.status, 201);
+    const createdLead = await createdLeadResponse.json();
+    const savedCustom = await db.query('SELECT workspace_id,value FROM lead_custom_fields WHERE lead_id=$1 AND field_definition_id=$2', [createdLead.id, requiredFieldId]);
+    assert.equal(savedCustom.rows[0].workspace_id, workspaceA);
+    assert.equal(savedCustom.rows[0].value, 'Enterprise');
+    const savedTag = await db.query('SELECT workspace_id,tag_id FROM lead_tags WHERE lead_id=$1', [createdLead.id]);
+    assert.deepEqual(savedTag.rows, [{ workspace_id: workspaceA, tag_id: newTag }]);
+
     const crossWorkspace = await bulk({ operation: 'tags', leadIds: [leadA, leadB], tagIds: [] });
     assert.equal(crossWorkspace.status, 404);
     const untouched = await db.query('SELECT tag_id FROM lead_tags WHERE workspace_id=$1 AND lead_id=$2', [workspaceA, leadA]);
