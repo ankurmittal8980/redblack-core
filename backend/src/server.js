@@ -16,6 +16,7 @@ import { ValidationError, decimal, objectBody, requiredString, optionalString, u
 import { communications, calling } from './providers.js';
 import { AIGateway } from './ai-gateway.js';
 import { OPENAPI_SPEC } from './openapi.js';
+import { parseCsv, serializeCsv } from './csv.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const staticRoot = path.resolve(here, '../../frontend/public');
@@ -25,7 +26,26 @@ const CHANNELS = ['email', 'whatsapp', 'rcs', 'voice'];
 const CALL_DIRECTIONS = ['inbound', 'outbound'];
 const CALL_STATUSES = ['queued', 'ringing', 'answered', 'missed', 'busy', 'failed', 'cancelled'];
 const ACTIVITY_TYPES = ['call', 'email', 'whatsapp', 'rcs', 'meeting', 'note', 'status_change', 'system'];
-const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft', 'wait', 'create_lead', 'update_lead', 'assign_owner', 'create_note', 'invoke_ai', 'call_webhook', 'notify_user', 'book_appointment', 'schedule_follow_up', 'send_communication', 'start_call'];
+const AUTOMATION_ACTIONS = ['create_task', 'create_activity', 'change_stage', 'create_message_draft', 'wait', 'update_lead', 'assign_owner', 'create_note', 'invoke_ai', 'schedule_follow_up', 'send_communication', 'start_call'];
+const LEAD_CSV_FIELDS = [
+  { key: 'firstName', label: 'First Name', aliases: ['first', 'firstname', 'given name'] },
+  { key: 'lastName', label: 'Last Name', aliases: ['last', 'lastname', 'surname', 'family name'] },
+  { key: 'email', label: 'Email', aliases: ['email address'] },
+  { key: 'phone', label: 'Phone', aliases: ['phone number', 'mobile', 'mobile number'] },
+  { key: 'companyName', label: 'Company', aliases: ['company name', 'organization', 'organisation'] },
+  { key: 'brandProject', label: 'Project', aliases: ['brand project', 'project name'] },
+  { key: 'opportunityType', label: 'Opportunity Type', aliases: ['opportunity', 'deal type'] },
+  { key: 'budget', label: 'Budget', aliases: ['deal size', 'amount'] },
+  { key: 'location', label: 'Location', aliases: ['city', 'region'] },
+  { key: 'status', label: 'Status', aliases: ['lead status'] },
+  { key: 'temperature', label: 'Temperature', aliases: ['lead temperature'] },
+  { key: 'score', label: 'Score', aliases: ['lead score'] },
+  { key: 'nextAction', label: 'Next Action', aliases: ['next step'] },
+  { key: 'nextActionAt', label: 'Next Follow-up', aliases: ['next follow up', 'follow-up date', 'follow up date'] },
+  { key: 'requirement', label: 'Requirement', aliases: ['requirements'] },
+  { key: 'notes', label: 'Notes', aliases: ['note'] },
+  { key: 'doNotContact', label: 'Do Not Contact', aliases: ['do not call', 'dnc'] }
+];
 const MIME = new Map([
   ['.html', 'text/html; charset=utf-8'], ['.css', 'text/css; charset=utf-8'], ['.js', 'text/javascript; charset=utf-8'],
   ['.svg', 'image/svg+xml'], ['.png', 'image/png'], ['.ico', 'image/x-icon']
@@ -39,6 +59,34 @@ function sendJson(response, status, value, headers = {}) {
   const body = JSON.stringify(value);
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), ...headers });
   response.end(body);
+}
+
+function sendCsv(response, filename, headers, rows) {
+  const body = serializeCsv(headers, rows);
+  response.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${filename}"`, 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store' });
+  response.end(body);
+}
+
+function csvHeaderKey(value) {
+  return String(value ?? '').replace(/^\uFEFF/, '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function leadCsvPlan(headers, customFields = []) {
+  const headerByKey = new Map(headers.map(header => [csvHeaderKey(header), header]));
+  const fields = [
+    ...LEAD_CSV_FIELDS.map(field => ({ key: field.key, label: field.label, required: false })),
+    ...customFields.map(field => ({ key: `custom:${field.id}`, label: `Custom: ${field.label}`, required: field.required }))
+  ];
+  const suggestedMapping = {};
+  for (const field of LEAD_CSV_FIELDS) {
+    const match = [field.label, ...field.aliases].map(csvHeaderKey).find(key => headerByKey.has(key));
+    if (match) suggestedMapping[field.key] = headerByKey.get(match);
+  }
+  for (const field of customFields) {
+    const match = [field.label, field.field_key, `Custom: ${field.label}`].map(csvHeaderKey).find(key => headerByKey.has(key));
+    if (match) suggestedMapping[`custom:${field.id}`] = headerByKey.get(match);
+  }
+  return { fields, suggestedMapping };
 }
 
 function secureHeaders(response) {
@@ -183,6 +231,16 @@ async function leadVisible(db, context, leadId) {
     [context.workspaceId, leadId, context.role, context.userId]
   );
   if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_FOUND', 'Lead was not found in this workspace.');
+}
+
+async function trashedLeadVisible(db, context, leadId) {
+  const result = await db.query(
+    `SELECT l.id FROM leads l
+      WHERE l.workspace_id = $1 AND l.id = $2 AND l.deleted_at IS NOT NULL
+        AND ($3 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id = l.workspace_id AND a.lead_id = l.id AND a.user_id = $4 AND a.unassigned_at IS NULL))`,
+    [context.workspaceId, leadId, context.role, context.userId]
+  );
+  if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not available in this workspace trash.');
 }
 
 function cursorFor(requestUrl) {
@@ -332,7 +390,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         const created = await createSession(db, { userId: user.id, workspaceId: selected?.id ?? null });
         setSessionCookies(response, created.token, created.csrf, created.expiresAt);
         sendJson(response, selected ? 200 : 409, {
-          user: publicUser(user), workspace: selected,
+          user: publicUser(user), role: selected?.role ?? null, workspace: selected,
           workspaces: selected ? undefined : memberships.rows,
           code: selected ? undefined : 'WORKSPACE_SELECTION_REQUIRED'
         }); return;
@@ -457,6 +515,226 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           sendJson(response, 200, result.rows[0]); return;
         }
 
+        if (suffix === 'leads/trash' && request.method === 'GET') {
+          requirePermission(context, 'crm:read');
+          const cursor = cursorFor(url); const limit = pageSize(url);
+          const values = [workspaceId, current.role, current.userId];
+          let cursorFilter = '';
+          if (cursor) { values.push(cursor[0], cursor[1]); cursorFilter = ` AND (l.deleted_at, l.id) < ($${values.length - 1}::timestamptz, $${values.length}::uuid)`; }
+          values.push(limit + 1);
+          const result = await db.query(
+            `SELECT l.id, l.first_name, l.last_name, l.company_name, l.email, l.phone, l.status, l.deleted_at, l.updated_at
+               FROM leads l
+              WHERE l.workspace_id=$1 AND l.deleted_at IS NOT NULL
+                AND ($2 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL))
+                ${cursorFilter}
+              ORDER BY l.deleted_at DESC, l.id DESC LIMIT $${values.length}`, values);
+          const hasMore = result.rows.length > limit; const data = result.rows.slice(0, limit);
+          sendJson(response, 200, { data, nextCursor: hasMore && data.length ? makeCursor(data.at(-1).deleted_at, data.at(-1).id) : null }); return;
+        }
+
+        if (suffix === 'leads/bulk' && request.method === 'POST') {
+          requirePermission(context, 'crm:write'); const input = await body();
+          if (!Array.isArray(input.leadIds) || input.leadIds.length < 1 || input.leadIds.length > 100) throw new ValidationError('leadIds must contain 1 to 100 leads.');
+          const ids = [...new Set(input.leadIds.map(value => uuid(value, 'leadId')))];
+          const operation = enumValue(input.operation, 'operation', ['trash','restore','status','owner','stage','tags']);
+          const expectsTrash = operation === 'restore';
+          const scoped = await db.query(
+            `SELECT id FROM leads WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND ${expectsTrash ? 'deleted_at IS NOT NULL' : 'deleted_at IS NULL'}`,
+            [workspaceId, ids]
+          );
+          if (scoped.rows.length !== ids.length) {
+            throw new HttpError(404, expectsTrash ? 'LEAD_NOT_IN_TRASH' : 'LEAD_NOT_FOUND', expectsTrash ? 'One or more leads are not available in this workspace trash.' : 'One or more leads were not found in this workspace.');
+          }
+          if (context.role === 'agent') {
+            const visible = await db.query('SELECT COUNT(*)::int AS count FROM leads l WHERE l.workspace_id=$1 AND l.id=ANY($2::uuid[]) AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL)', [workspaceId, ids, current.userId]);
+            if (visible.rows[0].count !== ids.length) throw new HttpError(403, 'LEAD_SCOPE_FORBIDDEN', 'One or more leads are outside your assignment scope.');
+          }
+          if (operation === 'owner' && !['owner','admin','manager'].includes(context.role)) throw new HttpError(403, 'OWNER_ASSIGNMENT_FORBIDDEN', 'Your role cannot reassign lead ownership.');
+          if (operation === 'restore') {
+            const conflicts = await db.query('SELECT l.id FROM leads l JOIN leads active ON active.workspace_id=l.workspace_id AND active.deleted_at IS NULL AND active.id<>l.id AND ((l.email_normalized IS NOT NULL AND active.email_normalized=l.email_normalized) OR (l.phone_normalized IS NOT NULL AND active.phone_normalized=l.phone_normalized)) WHERE l.workspace_id=$1 AND l.id=ANY($2::uuid[]) AND l.deleted_at IS NOT NULL LIMIT 1', [workspaceId, ids]);
+            if (conflicts.rows[0]) throw new HttpError(409, 'DUPLICATE_LEAD', 'One or more leads conflict with an active email or phone.');
+          }
+          let updated = [];
+          if (operation === 'stage') {
+            const pipelineId=uuid(input.pipelineId,'pipelineId'); const stageId=uuid(input.stageId,'stageId');
+            const stage=await db.query('SELECT s.id FROM pipeline_stages s JOIN pipelines p ON p.id=s.pipeline_id WHERE p.workspace_id=$1 AND p.id=$2 AND s.id=$3',[workspaceId,pipelineId,stageId]);
+            if(!stage.rows[0]) throw new HttpError(400,'INVALID_STAGE','Stage does not belong to this workspace pipeline.');
+            await transaction(db, async client => {
+              for(const leadId of ids) {
+                const prior=await client.query('SELECT current_stage_id FROM lead_pipeline_entries WHERE workspace_id=$1 AND lead_id=$2 AND pipeline_id=$3 AND is_current=true',[workspaceId,leadId,pipelineId]);
+                await client.query('UPDATE lead_pipeline_entries SET is_current=false,exited_at=now() WHERE workspace_id=$1 AND lead_id=$2 AND pipeline_id=$3 AND is_current=true',[workspaceId,leadId,pipelineId]);
+                await client.query('INSERT INTO lead_pipeline_entries(workspace_id,lead_id,pipeline_id,current_stage_id,is_current) VALUES($1,$2,$3,$4,true)',[workspaceId,leadId,pipelineId,stageId]);
+                await client.query('INSERT INTO lead_stage_history(workspace_id,lead_id,pipeline_id,from_stage_id,to_stage_id,changed_by) VALUES($1,$2,$3,$4,$5,$6)',[workspaceId,leadId,pipelineId,prior.rows[0]?.current_stage_id??null,stageId,current.userId]);
+                await dispatchAutomationEvent(client,{workspaceId,eventType:'lead.stage_changed',leadId,eventId:`bulk-stage:${leadId}:${stageId}`,actorUserId:current.userId,eventData:{pipelineId,fromStageId:prior.rows[0]?.current_stage_id??null,stageId}});
+                updated.push(leadId);
+              }
+            });
+          } else if (operation === 'tags') {
+            const tagIds=[...new Set((input.tagIds??[]).map(value=>uuid(value,'tagId')))];
+            if(tagIds.length){const valid=await db.query('SELECT id FROM tags WHERE workspace_id=$1 AND id=ANY($2::uuid[])',[workspaceId,tagIds]);if(valid.rows.length!==tagIds.length)throw new HttpError(400,'INVALID_TAG','One or more tags are invalid.');}
+            await transaction(db,async client=>{for(const leadId of ids){await client.query('DELETE FROM lead_tags WHERE workspace_id=$1 AND lead_id=$2',[workspaceId,leadId]);for(const tagId of tagIds)await client.query('INSERT INTO lead_tags(workspace_id,lead_id,tag_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[workspaceId,leadId,tagId]);updated.push(leadId);}});
+          } else if (operation === 'owner') {
+            const ownerId=uuid(input.ownerId,'ownerId'); const member=await db.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND active=true',[workspaceId,ownerId]); if(!member.rows[0])throw new HttpError(400,'ASSIGNEE_NOT_IN_WORKSPACE','Owner must be an active workspace member.');
+            await transaction(db,async client=>{for(const leadId of ids){await client.query('UPDATE lead_assignments SET unassigned_at=now() WHERE workspace_id=$1 AND lead_id=$2 AND unassigned_at IS NULL',[workspaceId,leadId]);await client.query('INSERT INTO lead_assignments(workspace_id,lead_id,user_id,assigned_by,reason) VALUES($1,$2,$3,$4,$5)',[workspaceId,leadId,ownerId,current.userId,'Bulk assignment']);await client.query('UPDATE leads SET owner_user_id=$3,updated_at=now() WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL',[workspaceId,leadId,ownerId]);updated.push(leadId);}});
+          } else {
+            const status=input.status?requiredString(input.status,'status',{max:80}):null; if(operation==='status'&&!status)throw new ValidationError('status is required.');
+            const result=await db.query(operation==='trash'?'UPDATE leads SET deleted_at=COALESCE(deleted_at,now()),updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id':operation==='restore'?'UPDATE leads SET deleted_at=NULL,updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NOT NULL RETURNING id':'UPDATE leads SET status=$3,updated_at=now() WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND deleted_at IS NULL RETURNING id',operation==='status'?[workspaceId,ids,status]:[workspaceId,ids]);
+            updated=result.rows.map(row=>row.id);
+          }
+          await audit(db,{workspaceId,actorUserId:current.userId,action:`leads.bulk_${operation}`,entityType:'lead',entityId:null,request,metadata:{count:updated.length}});
+          sendJson(response,200,{updated,operation}); return;
+        }
+        if (suffix === 'leads/export' && request.method === 'GET') {
+          requirePermission(context, 'crm:read');
+          const values = [workspaceId]; const filters = ['l.workspace_id=$1', 'l.deleted_at IS NULL'];
+          if (url.searchParams.get('status')) {
+            values.push(requiredString(url.searchParams.get('status'), 'status', { max: 80 }));
+            filters.push(`l.status=$${values.length}`);
+          }
+          if (url.searchParams.get('q')) {
+            values.push(`%${requiredString(url.searchParams.get('q'), 'q', { max: 120 }).replace(/[\\%_]/g, '\\$&')}%`);
+            filters.push(`(l.first_name ILIKE $${values.length} ESCAPE '\\' OR l.last_name ILIKE $${values.length} ESCAPE '\\' OR l.email ILIKE $${values.length} ESCAPE '\\' OR l.phone ILIKE $${values.length} ESCAPE '\\' OR l.company_name ILIKE $${values.length} ESCAPE '\\')`);
+          }
+          if (url.searchParams.get('pipelineId')) {
+            values.push(uuid(url.searchParams.get('pipelineId'), 'pipelineId'));
+            filters.push(`EXISTS (SELECT 1 FROM lead_pipeline_entries e WHERE e.workspace_id=l.workspace_id AND e.lead_id=l.id AND e.pipeline_id=$${values.length} AND e.is_current)`);
+          }
+          if (context.role === 'agent') {
+            values.push(current.userId);
+            filters.push(`EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$${values.length} AND a.unassigned_at IS NULL)`);
+          }
+          const result = await db.query(`SELECT l.id,l.first_name,l.last_name,l.email,l.phone,l.company_name,l.brand_project,l.opportunity_type,l.budget,l.location,l.status,l.temperature,l.score,l.next_action,l.next_action_at,l.requirement,l.notes,l.do_not_contact,l.created_at FROM leads l WHERE ${filters.join(' AND ')} ORDER BY l.created_at DESC,l.id DESC LIMIT 10000`, values);
+          const customFields = await db.query("SELECT id,label FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type='lead' ORDER BY created_at,id", [workspaceId]);
+          const customValues = new Map();
+          if (result.rows.length && customFields.rows.length) {
+            const valuesResult = await db.query('SELECT lead_id,field_definition_id,value FROM lead_custom_fields WHERE workspace_id=$1 AND lead_id=ANY($2::uuid[])', [workspaceId, result.rows.map(row => row.id)]);
+            for (const item of valuesResult.rows) {
+              if (!customValues.has(item.lead_id)) customValues.set(item.lead_id, new Map());
+              customValues.get(item.lead_id).set(item.field_definition_id, item.value);
+            }
+          }
+          const headers = ['First Name','Last Name','Email','Phone','Company','Project','Opportunity Type','Budget','Location','Status','Temperature','Score','Next Action','Next Follow-up','Requirement','Notes','Do Not Contact','Created', ...customFields.rows.map(field => `Custom: ${field.label}`)];
+          const rows = result.rows.map(row => [row.first_name,row.last_name,row.email,row.phone,row.company_name,row.brand_project,row.opportunity_type,row.budget,row.location,row.status,row.temperature,row.score,row.next_action,row.next_action_at,row.requirement,row.notes,row.do_not_contact,row.created_at, ...customFields.rows.map(field => customValues.get(row.id)?.get(field.id) ?? '')]);
+          sendCsv(response, 'redblack-leads.csv', headers, rows); return;
+        }
+
+        if (suffix === 'leads/import/preview' && request.method === 'POST') {
+          requirePermission(context, 'crm:write'); const input = await body();
+          const parsed = parseCsv(requiredString(input.csv, 'csv', { max: 900000 }));
+          if (parsed.records.length > 5000) throw new ValidationError('A single import is limited to 5,000 rows.');
+          if (!parsed.headers.length) throw new ValidationError('CSV must include a header row.');
+          const definitions = await db.query("SELECT id,label,field_key,field_type,required FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type='lead' ORDER BY config->>'order',created_at,id", [workspaceId]);
+          const plan = leadCsvPlan(parsed.headers, definitions.rows);
+          sendJson(response, 200, { headers: parsed.headers, rowCount: parsed.records.length, sampleRows: parsed.records.slice(0, 5).map(record => parsed.headers.map(header => record.values[header] ?? '')), fields: plan.fields, suggestedMapping: plan.suggestedMapping }); return;
+        }
+
+        if (suffix === 'leads/import' && request.method === 'POST') {
+          requirePermission(context, 'crm:write'); const input = await body();
+          const parsed = parseCsv(requiredString(input.csv, 'csv', { max: 900000 }));
+          if (parsed.records.length > 5000) throw new ValidationError('A single import is limited to 5,000 rows.');
+          if (!parsed.records.length) throw new ValidationError('CSV must include at least one lead row.');
+          const definitions = await db.query("SELECT id,label,field_key,field_type,required FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type='lead' ORDER BY config->>'order',created_at,id", [workspaceId]);
+          const plan = leadCsvPlan(parsed.headers, definitions.rows);
+          const suppliedMapping = input.mapping === undefined ? plan.suggestedMapping : objectBody(input.mapping);
+          const fieldKeys = new Set(plan.fields.map(field => field.key));
+          const mapping = {};
+          const usedHeaders = new Set();
+          for (const [fieldKey, rawHeader] of Object.entries(suppliedMapping)) {
+            if (!fieldKeys.has(fieldKey)) throw new ValidationError('CSV mapping contains an unsupported field.');
+            if (rawHeader === null || rawHeader === '') continue;
+            if (typeof rawHeader !== 'string' || !parsed.headers.includes(rawHeader)) throw new ValidationError(`CSV mapping for ${fieldKey} must select a column from this file.`);
+            if (usedHeaders.has(rawHeader)) throw new ValidationError('Each CSV column can be mapped to only one field.');
+            usedHeaders.add(rawHeader); mapping[fieldKey] = rawHeader;
+          }
+          if (!['firstName','email','phone'].some(key => mapping[key])) throw new ValidationError('Map First Name, Email or Phone before importing.');
+          for (const field of definitions.rows.filter(item => item.required)) {
+            if (!mapping[`custom:${field.id}`]) throw new ValidationError(`Map the required custom field “${field.label}” before importing.`);
+          }
+
+          const valueFor = (record, key) => mapping[key] ? String(record.values[mapping[key]] ?? '').trim() : '';
+          const summary = { totalRows: parsed.records.length, processed: 0, created: 0, skipped: 0, errors: [] };
+          for (const record of parsed.records) {
+            summary.processed += 1;
+            try {
+              const firstName = optionalString(valueFor(record, 'firstName') || null, 'firstName', 120);
+              const lastName = optionalString(valueFor(record, 'lastName') || null, 'lastName', 120);
+              const emailRaw = valueFor(record, 'email'); const email = normalizeEmail(emailRaw || null);
+              const phoneRaw = valueFor(record, 'phone'); const phone = normalizePhone(phoneRaw || null);
+              if (!firstName && !email && !phone) throw new ValidationError('Provide a first name, email address or phone number.');
+              const company = optionalString(valueFor(record, 'companyName') || null, 'company', 240);
+              const project = optionalString(valueFor(record, 'brandProject') || null, 'project', 240);
+              const opportunity = optionalString(valueFor(record, 'opportunityType') || null, 'opportunityType', 160);
+              const budgetRaw = valueFor(record, 'budget');
+              const budget = budgetRaw ? finiteNumber(Number(budgetRaw.replaceAll(',', '')), 'budget', { min: 0 }) : null;
+              const location = optionalString(valueFor(record, 'location') || null, 'location', 240);
+              const status = valueFor(record, 'status') ? requiredString(valueFor(record, 'status'), 'status', { max: 80 }) : 'New Lead';
+              const temperatureRaw = valueFor(record, 'temperature').toLowerCase();
+              const temperature = temperatureRaw ? enumValue(temperatureRaw, 'temperature', ['hot','warm','cold']) : null;
+              const scoreRaw = valueFor(record, 'score');
+              const score = scoreRaw ? Math.trunc(finiteNumber(Number(scoreRaw.replaceAll(',', '')), 'score', { min: 0, max: 10000 })) : 0;
+              const nextAction = optionalString(valueFor(record, 'nextAction') || null, 'nextAction', 500);
+              const nextActionAtRaw = valueFor(record, 'nextActionAt');
+              const nextActionAt = nextActionAtRaw ? isoDate(nextActionAtRaw, 'nextActionAt') : null;
+              const requirement = optionalString(valueFor(record, 'requirement') || null, 'requirement', 5000);
+              const notes = optionalString(valueFor(record, 'notes') || null, 'notes', 10000);
+              const doNotContactRaw = valueFor(record, 'doNotContact').toLowerCase();
+              const booleanValues = { true: true, yes: true, '1': true, false: false, no: false, '0': false };
+              if (doNotContactRaw && !Object.hasOwn(booleanValues, doNotContactRaw)) throw new ValidationError('Do Not Contact must be yes/no, true/false or 1/0.');
+              const doNotContact = doNotContactRaw ? booleanValues[doNotContactRaw] : false;
+              const customValues = [];
+              for (const definition of definitions.rows) {
+                const raw = valueFor(record, `custom:${definition.id}`);
+                let value = raw || null;
+                if (definition.field_type === 'checkbox' && raw) {
+                  const normalized = raw.toLowerCase();
+                  if (!Object.hasOwn(booleanValues, normalized)) throw new ValidationError(`${definition.label} must be yes/no, true/false or 1/0.`);
+                  value = booleanValues[normalized];
+                } else if (definition.field_type === 'number' && raw) {
+                  value = finiteNumber(Number(raw.replaceAll(',', '')), definition.label);
+                } else if (definition.field_type === 'multiselect' && raw) {
+                  value = raw.split('|').map(item => item.trim()).filter(Boolean);
+                }
+                if (definition.required && (value === null || value === '')) throw new ValidationError(`${definition.label} is required.`);
+                if (mapping[`custom:${definition.id}`] && value !== null && value !== '') customValues.push({ id: definition.id, value });
+              }
+
+              const outcome = await transaction(db, async client => {
+                if (email || phone) {
+                  const duplicate = await client.query('SELECT id FROM leads WHERE workspace_id=$1 AND deleted_at IS NULL AND (($2::text IS NOT NULL AND email_normalized=$2) OR ($3::text IS NOT NULL AND phone_normalized=$3)) LIMIT 1', [workspaceId,email,phone]);
+                  if (duplicate.rows[0]) return 'duplicate';
+                }
+                const inserted = await client.query(`INSERT INTO leads(workspace_id,first_name,last_name,email,email_normalized,phone,phone_normalized,company_name,brand_project,opportunity_type,budget,location,status,temperature,score,next_action,next_action_at,requirement,notes,do_not_contact)
+                  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id`, [workspaceId,firstName,lastName,emailRaw || null,email,phoneRaw || null,phone,company,project,opportunity,budget,location,status,temperature,score,nextAction,nextActionAt,requirement,notes,doNotContact]);
+                const leadId = inserted.rows[0].id;
+                for (const field of customValues) await client.query('INSERT INTO lead_custom_fields(workspace_id,lead_id,field_definition_id,value) VALUES($1,$2,$3,$4::jsonb)', [workspaceId,leadId,field.id,JSON.stringify(field.value)]);
+                await client.query("INSERT INTO activities(workspace_id,lead_id,user_id,type,title,body) VALUES($1,$2,$3,'system','Lead imported','Lead imported from CSV.')", [workspaceId,leadId,current.userId]);
+                const ruleResult = await applyLeadRules(client, { workspaceId, leadId, actorUserId: current.userId });
+                if (current.role === 'agent') {
+                  const assignment = await client.query('SELECT 1 FROM lead_assignments WHERE workspace_id=$1 AND lead_id=$2 AND user_id=$3 AND unassigned_at IS NULL', [workspaceId,leadId,current.userId]);
+                  if (!assignment.rows[0]) {
+                    const existing = await client.query('SELECT 1 FROM lead_assignments WHERE workspace_id=$1 AND lead_id=$2 AND unassigned_at IS NULL', [workspaceId,leadId]);
+                    if (!existing.rows[0]) {
+                      await client.query("INSERT INTO lead_assignments(workspace_id,lead_id,user_id,assigned_by,reason) VALUES($1,$2,$3,$3,'CSV import')", [workspaceId,leadId,current.userId]);
+                      await client.query('UPDATE leads SET owner_user_id=$3 WHERE workspace_id=$1 AND id=$2', [workspaceId,leadId,current.userId]);
+                    }
+                  }
+                }
+                if (ruleResult.scoreChanged) await dispatchAutomationEvent(client, { workspaceId,eventType:'lead.score_changed',leadId,eventId:`csv-score:${leadId}:${Date.now()}`,actorUserId:current.userId });
+                await dispatchAutomationEvent(client, { workspaceId,eventType:'lead.created',leadId,eventId:`csv-import:${leadId}`,actorUserId:current.userId });
+                await audit(client, { workspaceId,actorUserId:current.userId,action:'lead.created',entityType:'lead',entityId:leadId,request,metadata:{ source:'csv_import', row:record.rowNumber } });
+                return 'created';
+              });
+              if (outcome === 'duplicate') summary.skipped += 1;
+              else summary.created += 1;
+            } catch (error) {
+              summary.errors.push({ row: record.rowNumber, message: error.message });
+            }
+          }
+          await audit(db, { workspaceId,actorUserId:current.userId,action:'leads.imported',entityType:'lead',entityId:null,request,metadata:{ totalRows:summary.totalRows,processed:summary.processed,created:summary.created,skipped:summary.skipped,errorCount:summary.errors.length } });
+          sendJson(response, 200, summary); return;
+        }
+
         if (suffix === 'leads' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
           const cursor = cursorFor(url); const limit = pageSize(url); const values = [workspaceId]; const filters = ['l.workspace_id = $1', 'l.deleted_at IS NULL'];
@@ -469,7 +747,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           const result = await db.query(
             `SELECT l.id, l.first_name, l.last_name, l.company_name, l.email, l.phone, l.source_id,
                     l.brand_project, l.opportunity_type, l.budget, l.location, l.requirement, l.status,
-                    l.temperature, l.score, l.next_action, l.next_action_at, l.owner_user_id, l.created_at, l.updated_at
+                    l.temperature, l.score, l.next_action, l.next_action_at, l.owner_user_id, l.created_at, l.updated_at,
+                    (SELECT e.current_stage_id FROM lead_pipeline_entries e WHERE e.workspace_id=l.workspace_id AND e.lead_id=l.id AND e.is_current ORDER BY e.entered_at DESC LIMIT 1) AS current_stage_id,
+                    (SELECT e.pipeline_id FROM lead_pipeline_entries e WHERE e.workspace_id=l.workspace_id AND e.lead_id=l.id AND e.is_current ORDER BY e.entered_at DESC LIMIT 1) AS current_pipeline_id
                FROM leads l WHERE ${filters.join(' AND ')} ORDER BY l.created_at DESC, l.id DESC LIMIT $${values.length}`,
             values
           );
@@ -506,6 +786,28 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
                 input.nextActionAt ? isoDate(input.nextActionAt, 'nextActionAt') : null, booleanInput(input.doNotContact, 'doNotContact')]
             );
             const lead = inserted.rows[0];
+            const customFields = input.customFields && typeof input.customFields === 'object' && !Array.isArray(input.customFields) ? input.customFields : {};
+            const definitions = await client.query("SELECT id,label,required FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type='lead'", [workspaceId]);
+            const definitionsById = new Map(definitions.rows.map(item => [item.id, item]));
+            for (const [rawFieldId, value] of Object.entries(customFields)) {
+              const fieldId = uuid(rawFieldId, 'customFieldId'); const definition = definitionsById.get(fieldId);
+              if (!definition) throw new HttpError(400, 'INVALID_CUSTOM_FIELD', 'A custom field does not belong to this workspace.');
+              if (definition.required && (value === null || value === '' || (Array.isArray(value) && value.length === 0))) throw new ValidationError(`${definition.label} is required.`);
+            }
+            for (const definition of definitions.rows.filter(item => item.required)) {
+              const value = customFields[definition.id];
+              if (value === undefined || value === null || value === '' || (Array.isArray(value) && value.length === 0)) throw new ValidationError(`${definition.label} is required.`);
+            }
+            for (const [rawFieldId, value] of Object.entries(customFields)) {
+              const fieldId = uuid(rawFieldId, 'customFieldId');
+              await client.query('INSERT INTO lead_custom_fields(workspace_id,lead_id,field_definition_id,value) VALUES($1,$2,$3,$4::jsonb)', [workspaceId, lead.id, fieldId, JSON.stringify(value)]);
+            }
+            const tagIds = Array.isArray(input.tagIds) ? [...new Set(input.tagIds.map(value => uuid(value, 'tagId')))] : [];
+            if (tagIds.length) {
+              const validTags = await client.query('SELECT id FROM tags WHERE workspace_id=$1 AND id=ANY($2::uuid[])', [workspaceId, tagIds]);
+              if (validTags.rows.length !== tagIds.length) throw new HttpError(400, 'INVALID_TAG', 'One or more tags do not belong to this workspace.');
+              for (const tagId of tagIds) await client.query('INSERT INTO lead_tags(workspace_id,lead_id,tag_id) VALUES($1,$2,$3)', [workspaceId, lead.id, tagId]);
+            }
             if (input.pipelineId || input.stageId) {
               const pipelineId = uuid(input.pipelineId, 'pipelineId'); const stageId = uuid(input.stageId, 'stageId');
               await client.query(`INSERT INTO lead_pipeline_entries(workspace_id, lead_id, pipeline_id, current_stage_id) VALUES($1,$2,$3,$4)`, [workspaceId, lead.id, pipelineId, stageId]);
@@ -513,6 +815,8 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             }
             await client.query(`INSERT INTO activities(workspace_id, lead_id, user_id, type, title, body) VALUES($1,$2,$3,'system','Lead created','Lead created from CRM.')`, [workspaceId, lead.id, current.userId]);
             await audit(client, { workspaceId, actorUserId: current.userId, action: 'lead.created', entityType: 'lead', entityId: lead.id, request });
+            const ruleResult = await applyLeadRules(client, { workspaceId, leadId: lead.id, actorUserId: current.userId });
+            if (ruleResult.scoreChanged) await dispatchAutomationEvent(client, { workspaceId, eventType: 'lead.score_changed', leadId: lead.id, eventId: `lead-score:${lead.id}:${Date.now()}`, actorUserId: current.userId });
             await dispatchAutomationEvent(client, { workspaceId, eventType: 'lead.created', leadId: lead.id, eventId: `lead-created:${lead.id}`, actorUserId: current.userId });
             return lead;
           });
@@ -522,11 +826,16 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         const leadRoute = suffix.match(/^leads\/([^/]+)(?:\/(.*))?$/);
         if (leadRoute) {
           const leadId = uuid(leadRoute[1], 'leadId'); const action = leadRoute[2] ?? '';
-          await leadVisible(db, context, leadId);
+          if (action === 'restore' || action === 'permanent') await trashedLeadVisible(db, context, leadId);
+          else await leadVisible(db, context, leadId);
           if (request.method === 'GET' && !action) {
             requirePermission(context, 'crm:read');
             const result = await db.query('SELECT * FROM leads WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL', [workspaceId, leadId]);
-            sendJson(response, 200, result.rows[0]); return;
+            const custom = await db.query(`SELECT d.id, d.field_key, d.label, d.field_type, d.required, d.config, v.value
+              FROM custom_field_definitions d LEFT JOIN lead_custom_fields v ON v.field_definition_id=d.id AND v.lead_id=$2
+              WHERE d.workspace_id=$1 AND d.entity_type='lead' ORDER BY d.created_at`, [workspaceId, leadId]);
+            const tags = await db.query(`SELECT t.id,t.name FROM tags t JOIN lead_tags lt ON lt.tag_id=t.id WHERE t.workspace_id=$1 AND lt.lead_id=$2 ORDER BY t.name`, [workspaceId, leadId]);
+            sendJson(response, 200, { ...result.rows[0], customFields: custom.rows, tags: tags.rows }); return;
           }
           if (request.method === 'GET' && action === 'timeline') {
             requirePermission(context, 'crm:read');
@@ -554,7 +863,8 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             if (input.temperature !== undefined) updates.set('temperature', input.temperature === null ? null : enumValue(input.temperature, 'temperature', ['hot','warm','cold']));
             if (input.nextActionAt !== undefined) updates.set('next_action_at', input.nextActionAt ? isoDate(input.nextActionAt, 'nextActionAt') : null);
             if (input.doNotContact !== undefined) { if (typeof input.doNotContact !== 'boolean') throw new ValidationError('doNotContact must be a boolean.'); updates.set('do_not_contact', input.doNotContact); }
-            if (!updates.size) throw new HttpError(400, 'NO_FIELDS', 'No supported lead fields were provided.');
+            const hasCustomFields = input.customFields && typeof input.customFields === 'object' && !Array.isArray(input.customFields); const hasTags = Array.isArray(input.tagIds);
+            if (!updates.size && !hasCustomFields && !hasTags) throw new HttpError(400, 'NO_FIELDS', 'No supported lead fields were provided.');
             if (updates.has('email_normalized') || updates.has('phone_normalized')) {
               const candidate = await db.query(
                 `SELECT id FROM leads WHERE workspace_id = $1 AND id <> $2 AND deleted_at IS NULL
@@ -565,15 +875,64 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             }
             const values = [workspaceId, leadId]; const assignments = [];
             for (const [column, value] of updates) { values.push(value); assignments.push(`${column} = $${values.length}`); }
-            const result = await db.query(`UPDATE leads SET ${assignments.join(', ')}, updated_at = now() WHERE workspace_id = $1 AND id = $2 RETURNING *`, values);
-            await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.updated', entityType: 'lead', entityId: leadId, request, metadata: { fields: [...updates.keys()] } });
-            sendJson(response, 200, result.rows[0]); return;
+            const result = await transaction(db, async client => {
+              let updated;
+              if (assignments.length) updated = await client.query(`UPDATE leads SET ${assignments.join(', ')}, updated_at = now() WHERE workspace_id = $1 AND id = $2 RETURNING *`, values);
+              else updated = await client.query('SELECT * FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceId, leadId]);
+              if (hasCustomFields) {
+                const entries = Object.entries(input.customFields);
+                for (const [fieldId, value] of entries) {
+                  const definitionId = uuid(fieldId, 'customFieldId');
+                  const definition = await client.query("SELECT id,required FROM custom_field_definitions WHERE workspace_id=$1 AND id=$2 AND entity_type='lead'", [workspaceId, definitionId]);
+                  if (!definition.rows[0]) throw new HttpError(400, 'INVALID_CUSTOM_FIELD', 'A custom field does not belong to this workspace.');
+                  if (definition.rows[0].required && (value === null || value === '' || (Array.isArray(value) && value.length === 0))) throw new ValidationError('Required custom fields cannot be empty.');
+                  await client.query(`INSERT INTO lead_custom_fields(workspace_id,lead_id,field_definition_id,value) VALUES($1,$2,$3,$4::jsonb)
+                    ON CONFLICT(lead_id,field_definition_id) DO UPDATE SET workspace_id=EXCLUDED.workspace_id,value=EXCLUDED.value`, [workspaceId, leadId, definitionId, JSON.stringify(value)]);
+                }
+              }
+              if (hasTags) {
+                const tagIds = [...new Set(input.tagIds.map(value => uuid(value, 'tagId')))];
+                if (tagIds.length) {
+                  const valid = await client.query('SELECT id FROM tags WHERE workspace_id=$1 AND id=ANY($2::uuid[])', [workspaceId, tagIds]);
+                  if (valid.rows.length !== tagIds.length) throw new HttpError(400, 'INVALID_TAG', 'One or more tags do not belong to this workspace.');
+                }
+                await client.query('DELETE FROM lead_tags WHERE workspace_id=$1 AND lead_id=$2', [workspaceId, leadId]);
+                for (const tagId of tagIds) await client.query('INSERT INTO lead_tags(workspace_id,lead_id,tag_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING', [workspaceId, leadId, tagId]);
+              }
+              await audit(client, { workspaceId, actorUserId: current.userId, action: 'lead.updated', entityType: 'lead', entityId: leadId, request, metadata: { fields: [...updates.keys()], customFields: hasCustomFields, tags: hasTags } });
+              const ruleResult = await applyLeadRules(client, { workspaceId, leadId, actorUserId: current.userId });
+              await dispatchAutomationEvent(client, { workspaceId, eventType: 'lead.updated', leadId, eventId: `lead-updated:${leadId}:${Date.now()}`, actorUserId: current.userId, eventData: { fields: [...updates.keys()] } });
+              if (ruleResult.scoreChanged) await dispatchAutomationEvent(client, { workspaceId, eventType: 'lead.score_changed', leadId, eventId: `lead-score:${leadId}:${Date.now()}`, actorUserId: current.userId });
+              return updated.rows[0];
+            });
+            sendJson(response, 200, result); return;
           }
           if (request.method === 'DELETE' && !action) {
             requirePermission(context, 'crm:write');
             const result = await db.query('UPDATE leads SET deleted_at = now(), updated_at = now() WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL RETURNING id', [workspaceId, leadId]);
             await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.archived', entityType: 'lead', entityId: leadId, request });
             sendJson(response, 200, { id: result.rows[0]?.id, archived: true }); return;
+          }
+          if (request.method === 'DELETE' && action === 'permanent') {
+            requirePermission(context, 'workspace:manage');
+            const deleted = await transaction(db, async client => {
+              const result = await client.query('DELETE FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NOT NULL RETURNING id', [workspaceId, leadId]);
+              if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not in trash.');
+              await audit(client, { workspaceId, actorUserId: current.userId, action: 'lead.permanently_deleted', entityType: 'lead', entityId: leadId, request });
+              return result.rows[0];
+            });
+            sendJson(response, 200, { id: deleted.id, deleted: true }); return;
+          }
+          if (request.method === 'POST' && action === 'restore') {
+            requirePermission(context, 'crm:write');
+            const identity = await db.query('SELECT email_normalized, phone_normalized FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NOT NULL', [workspaceId, leadId]);
+            if (!identity.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not in trash.');
+            const collision = await db.query('SELECT id FROM leads WHERE workspace_id=$1 AND deleted_at IS NULL AND id<>$2 AND (($3::text IS NOT NULL AND email_normalized=$3) OR ($4::text IS NOT NULL AND phone_normalized=$4)) LIMIT 1', [workspaceId, leadId, identity.rows[0].email_normalized, identity.rows[0].phone_normalized]);
+            if (collision.rows[0]) throw new HttpError(409, 'DUPLICATE_LEAD', 'An active lead already uses this email or phone.');
+            const result = await db.query('UPDATE leads SET deleted_at = NULL, updated_at = now() WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NOT NULL RETURNING id', [workspaceId, leadId]);
+            if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not in trash.');
+            await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.restored', entityType: 'lead', entityId: leadId, request });
+            sendJson(response, 200, { id: result.rows[0].id, restored: true }); return;
           }
           if (request.method === 'POST' && action === 'assign') {
             requirePermission(context, 'crm:write'); const input = await body(); const userId = uuid(input.userId, 'userId');
@@ -669,25 +1028,44 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             [workspaceId, pipelineId, name, stageSlug, position, booleanInput(input.isWon, 'isWon'), booleanInput(input.isLost, 'isLost')]
           );
           if (!result.rows[0]) throw new HttpError(404, 'PIPELINE_NOT_FOUND', 'Pipeline was not found.');
+          await audit(db, { workspaceId, actorUserId: current.userId, action: 'pipeline.stage_created', entityType: 'pipeline_stage', entityId: result.rows[0].id, request, metadata: { pipelineId } });
           sendJson(response, 201, result.rows[0]); return;
         }
         if (pipelineMatch && request.method === 'PATCH' && /^stages\//.test(pipelineMatch[2] ?? '')) {
           requirePermission(context, 'workspace:manage'); const pipelineId = uuid(pipelineMatch[1], 'pipelineId'); const stageId = uuid(pipelineMatch[2].slice('stages/'.length), 'stageId'); const input = await body();
           const fields = []; const values = [pipelineId, stageId, workspaceId];
+          let requestedPosition = null;
           if (input.name !== undefined) { values.push(requiredString(input.name, 'name', { max: 120 })); fields.push(`name=$${values.length}`); }
           if (input.slug !== undefined) { values.push(slug(input.slug)); fields.push(`slug=$${values.length}`); }
-          if (input.position !== undefined) { values.push(Math.trunc(finiteNumber(input.position, 'position', { min: 0, max: 10000 }))); fields.push(`position=$${values.length}`); }
+          if (input.position !== undefined) { requestedPosition = Math.trunc(finiteNumber(input.position, 'position', { min: 0, max: 10000 })); values.push(requestedPosition); fields.push(`position=$${values.length}`); }
           if (input.isWon !== undefined) { if (typeof input.isWon !== 'boolean') throw new ValidationError('isWon must be a boolean.'); values.push(input.isWon); fields.push(`is_won=$${values.length}`); }
           if (input.isLost !== undefined) { if (typeof input.isLost !== 'boolean') throw new ValidationError('isLost must be a boolean.'); values.push(input.isLost); fields.push(`is_lost=$${values.length}`); }
           if (!fields.length) throw new HttpError(400, 'NO_FIELDS', 'Provide stage fields.');
-          const result = await db.query(`UPDATE pipeline_stages s SET ${fields.join(', ')} FROM pipelines p WHERE s.pipeline_id=$1 AND s.id=$2 AND p.workspace_id=$3 AND p.id=s.pipeline_id RETURNING s.id,s.name,s.slug,s.position,s.is_won,s.is_lost`, values);
-          if (!result.rows[0]) throw new HttpError(404, 'STAGE_NOT_FOUND', 'Stage was not found.'); sendJson(response, 200, result.rows[0]); return;
+          const updateStage = async client => {
+            if (requestedPosition !== null) {
+              const currentStage = await client.query('SELECT s.position FROM pipeline_stages s JOIN pipelines p ON p.id=s.pipeline_id WHERE p.workspace_id=$1 AND p.id=$2 AND s.id=$3 FOR UPDATE', [workspaceId, pipelineId, stageId]);
+              if (!currentStage.rows[0]) throw new HttpError(404, 'STAGE_NOT_FOUND', 'Stage was not found.');
+              const priorPosition = Number(currentStage.rows[0].position);
+              if (priorPosition !== requestedPosition) {
+                const temporary = await client.query('SELECT COALESCE(MIN(position),0)-1 AS position FROM pipeline_stages WHERE pipeline_id=$1', [pipelineId]);
+                const temporaryPosition = Number(temporary.rows[0].position);
+                await client.query('UPDATE pipeline_stages SET position=$3 WHERE pipeline_id=$1 AND id=$2', [pipelineId, stageId, temporaryPosition]);
+                await client.query('UPDATE pipeline_stages SET position=$3 WHERE pipeline_id=$1 AND position=$2 AND id<>$4', [pipelineId, requestedPosition, priorPosition, stageId]);
+              }
+            }
+            const result = await client.query(`UPDATE pipeline_stages s SET ${fields.join(', ')} FROM pipelines p WHERE s.pipeline_id=$1 AND s.id=$2 AND p.workspace_id=$3 AND p.id=s.pipeline_id RETURNING s.id,s.name,s.slug,s.position,s.is_won,s.is_lost`, values);
+            if (!result.rows[0]) throw new HttpError(404, 'STAGE_NOT_FOUND', 'Stage was not found.');
+            await audit(client, { workspaceId, actorUserId: current.userId, action: 'pipeline.stage_updated', entityType: 'pipeline_stage', entityId: stageId, request, metadata: { pipelineId, fields: fields.map(item => item.split('=')[0]) } });
+            return result.rows[0];
+          };
+          const updated = requestedPosition === null ? await updateStage(db) : await transaction(db, updateStage);
+          sendJson(response, 200, updated); return;
         }
         if (suffix === 'custom-fields' && request.method === 'GET') {
           requirePermission(context, 'crm:read'); const result = await db.query('SELECT id, entity_type, field_key, label, field_type, required, config, created_at FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type=$2 ORDER BY created_at', [workspaceId, url.searchParams.get('entityType') ?? 'lead']); sendJson(response, 200, { data: result.rows }); return;
         }
         if (suffix === 'custom-fields' && request.method === 'POST') {
-          requirePermission(context, 'workspace:manage'); const input = await body(); const result = await db.query('INSERT INTO custom_field_definitions(workspace_id, entity_type, field_key, label, field_type, required, config) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING *', [workspaceId, enumValue(input.entityType ?? 'lead', 'entityType', ['lead']), requiredString(input.fieldKey, 'fieldKey', { max: 80 }).toLowerCase(), requiredString(input.label, 'label', { max: 160 }), enumValue(input.fieldType ?? 'text', 'fieldType', ['text','number','date','boolean','select','multiselect']), booleanInput(input.required, 'required'), JSON.stringify(input.config ?? {})]); sendJson(response, 201, result.rows[0]); return;
+          requirePermission(context, 'workspace:manage'); const input = await body(); const result = await db.query('INSERT INTO custom_field_definitions(workspace_id, entity_type, field_key, label, field_type, required, config) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING *', [workspaceId, enumValue(input.entityType ?? 'lead', 'entityType', ['lead']), requiredString(input.fieldKey, 'fieldKey', { max: 80 }).toLowerCase(), requiredString(input.label, 'label', { max: 160 }), enumValue(input.fieldType ?? 'text', 'fieldType', ['text','textarea','number','currency','date','datetime','boolean','select','multiselect','email','phone','url']), booleanInput(input.required, 'required'), JSON.stringify(input.config ?? {})]); sendJson(response, 201, result.rows[0]); return;
         }
         const fieldMatch = suffix.match(/^custom-fields\/([^/]+)$/);
         if (fieldMatch && request.method === 'PATCH') {
@@ -699,6 +1077,48 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         if (suffix === 'tags' && request.method === 'POST') { requirePermission(context, 'workspace:manage'); const input = await body(); const result = await db.query('INSERT INTO tags(workspace_id,name) VALUES($1,$2) RETURNING id,name', [workspaceId, requiredString(input.name, 'name', { max: 80 })]); sendJson(response, 201, result.rows[0]); return; }
         const tagMatch = suffix.match(/^tags\/([^/]+)$/);
         if (tagMatch && request.method === 'PATCH') { requirePermission(context, 'workspace:manage'); const input = await body(); const result = await db.query('UPDATE tags SET name=$3 WHERE workspace_id=$1 AND id=$2 RETURNING id,name', [workspaceId, uuid(tagMatch[1], 'tagId'), requiredString(input.name, 'name', { max: 80 })]); if (!result.rows[0]) throw new HttpError(404, 'TAG_NOT_FOUND', 'Tag was not found.'); sendJson(response, 200, result.rows[0]); return; }
+
+        if (suffix === 'lead-sources' && request.method === 'GET') { requirePermission(context, 'crm:read'); const result=await db.query('SELECT id,name FROM lead_sources WHERE workspace_id=$1 ORDER BY name',[workspaceId]); sendJson(response,200,{data:result.rows}); return; }
+        if (suffix === 'lead-sources' && request.method === 'POST') { requirePermission(context, 'workspace:manage'); const input=await body(); const result=await db.query('INSERT INTO lead_sources(workspace_id,name) VALUES($1,$2) RETURNING id,name',[workspaceId,requiredString(input.name,'name',{max:120})]); sendJson(response,201,result.rows[0]); return; }
+        if (suffix === 'task-types' && request.method === 'GET') { requirePermission(context, 'crm:read'); const result=await db.query('SELECT id,name,active FROM crm_task_types WHERE workspace_id=$1 ORDER BY name',[workspaceId]); sendJson(response,200,{data:result.rows}); return; }
+        if (suffix === 'task-types' && request.method === 'POST') { requirePermission(context, 'workspace:manage'); const input=await body(); const result=await db.query('INSERT INTO crm_task_types(workspace_id,name) VALUES($1,$2) RETURNING *',[workspaceId,requiredString(input.name,'name',{max:120})]); sendJson(response,201,result.rows[0]); return; }
+        if (suffix === 'assignment-rules' && request.method === 'GET') { requirePermission(context, 'crm:read'); const result=await db.query('SELECT * FROM crm_assignment_rules WHERE workspace_id=$1 ORDER BY priority,id',[workspaceId]); sendJson(response,200,{data:result.rows}); return; }
+        if (suffix === 'assignment-rules' && request.method === 'POST') { requirePermission(context, 'workspace:manage'); const input=await body(); const result=await db.query('INSERT INTO crm_assignment_rules(workspace_id,name,priority,conditions,strategy,config,active) VALUES($1,$2,$3,$4::jsonb,$5,$6::jsonb,$7) RETURNING *',[workspaceId,requiredString(input.name,'name',{max:160}),Math.trunc(finiteNumber(input.priority??100,'priority',{min:0,max:10000})),JSON.stringify(objectBody(input.conditions??{})),enumValue(input.strategy,'strategy',['fixed_owner','round_robin','unassigned']),JSON.stringify(objectBody(input.config??{})),booleanInput(input.active,'active',true)]); sendJson(response,201,result.rows[0]); return; }
+        if (suffix === 'scoring-rules' && request.method === 'GET') { requirePermission(context, 'crm:read'); const result=await db.query('SELECT * FROM crm_scoring_rules WHERE workspace_id=$1 ORDER BY priority,id',[workspaceId]); sendJson(response,200,{data:result.rows}); return; }
+        if (suffix === 'scoring-rules' && request.method === 'POST') { requirePermission(context, 'workspace:manage'); const input=await body(); const result=await db.query('INSERT INTO crm_scoring_rules(workspace_id,name,priority,conditions,score_delta,active) VALUES($1,$2,$3,$4::jsonb,$5,$6) RETURNING *',[workspaceId,requiredString(input.name,'name',{max:160}),Math.trunc(finiteNumber(input.priority??100,'priority',{min:0,max:10000})),JSON.stringify(objectBody(input.conditions??{})),Math.trunc(finiteNumber(input.scoreDelta,'scoreDelta',{min:-10000,max:10000})),booleanInput(input.active,'active',true)]); sendJson(response,201,result.rows[0]); return; }
+        const assignmentRuleMatch = suffix.match(/^assignment-rules\/([^/]+)$/);
+        if (assignmentRuleMatch && request.method === 'PATCH') {
+          requirePermission(context, 'workspace:manage'); const ruleId=uuid(assignmentRuleMatch[1],'ruleId'); const input=await body(); const values=[workspaceId,ruleId]; const sets=[];
+          if(input.name!==undefined){values.push(requiredString(input.name,'name',{max:160}));sets.push(`name=$${values.length}`);}
+          if(input.priority!==undefined){values.push(Math.trunc(finiteNumber(input.priority,'priority',{min:0,max:10000})));sets.push(`priority=$${values.length}`);}
+          if(input.conditions!==undefined){values.push(JSON.stringify(objectBody(input.conditions)));sets.push(`conditions=$${values.length}::jsonb`);}
+          if(input.strategy!==undefined){values.push(enumValue(input.strategy,'strategy',['fixed_owner','round_robin','unassigned']));sets.push(`strategy=$${values.length}`);}
+          if(input.config!==undefined){values.push(JSON.stringify(objectBody(input.config)));sets.push(`config=$${values.length}::jsonb`);}
+          if(input.active!==undefined){if(typeof input.active!=='boolean')throw new ValidationError('active must be a boolean.');values.push(input.active);sets.push(`active=$${values.length}`);}
+          if(!sets.length)throw new HttpError(400,'NO_FIELDS','Provide assignment rule settings.');
+          const result=await db.query(`UPDATE crm_assignment_rules SET ${sets.join(', ')},updated_at=now() WHERE workspace_id=$1 AND id=$2 RETURNING *`,values);
+          if(!result.rows[0])throw new HttpError(404,'ASSIGNMENT_RULE_NOT_FOUND','Assignment rule was not found.');
+          await audit(db,{workspaceId,actorUserId:current.userId,action:'crm.assignment_rule_updated',entityType:'crm_assignment_rule',entityId:ruleId,request});
+          sendJson(response,200,result.rows[0]);return;
+        }
+        const scoringRuleMatch = suffix.match(/^scoring-rules\/([^/]+)$/);
+        if (scoringRuleMatch && request.method === 'PATCH') {
+          requirePermission(context, 'workspace:manage'); const ruleId=uuid(scoringRuleMatch[1],'ruleId'); const input=await body(); const values=[workspaceId,ruleId]; const sets=[];
+          if(input.name!==undefined){values.push(requiredString(input.name,'name',{max:160}));sets.push(`name=$${values.length}`);}
+          if(input.priority!==undefined){values.push(Math.trunc(finiteNumber(input.priority,'priority',{min:0,max:10000})));sets.push(`priority=$${values.length}`);}
+          if(input.conditions!==undefined){values.push(JSON.stringify(objectBody(input.conditions)));sets.push(`conditions=$${values.length}::jsonb`);}
+          if(input.scoreDelta!==undefined){values.push(Math.trunc(finiteNumber(input.scoreDelta,'scoreDelta',{min:-10000,max:10000})));sets.push(`score_delta=$${values.length}`);}
+          if(input.active!==undefined){if(typeof input.active!=='boolean')throw new ValidationError('active must be a boolean.');values.push(input.active);sets.push(`active=$${values.length}`);}
+          if(!sets.length)throw new HttpError(400,'NO_FIELDS','Provide scoring rule settings.');
+          const result=await db.query(`UPDATE crm_scoring_rules SET ${sets.join(', ')},updated_at=now() WHERE workspace_id=$1 AND id=$2 RETURNING *`,values);
+          if(!result.rows[0])throw new HttpError(404,'SCORING_RULE_NOT_FOUND','Scoring rule was not found.');
+          await audit(db,{workspaceId,actorUserId:current.userId,action:'crm.scoring_rule_updated',entityType:'crm_scoring_rule',entityId:ruleId,request});
+          sendJson(response,200,result.rows[0]);return;
+        }
+        if (suffix === 'saved-views' && request.method === 'GET') { requirePermission(context, 'crm:read'); const result=await db.query('SELECT * FROM crm_saved_views WHERE workspace_id=$1 AND entity_type=$2 AND (user_id IS NULL OR user_id=$3) ORDER BY name',[workspaceId,url.searchParams.get('entityType')??'lead',current.userId]); sendJson(response,200,{data:result.rows}); return; }
+        if (suffix === 'saved-views' && request.method === 'POST') { requirePermission(context, 'crm:read'); const input=await body(); const result=await db.query('INSERT INTO crm_saved_views(workspace_id,user_id,entity_type,name,config) VALUES($1,$2,$3,$4,$5::jsonb) RETURNING *',[workspaceId,current.userId,enumValue(input.entityType??'lead','entityType',['lead']),requiredString(input.name,'name',{max:160}),JSON.stringify(objectBody(input.config??{}))]); sendJson(response,201,result.rows[0]); return; }
+        if (suffix === 'layouts' && request.method === 'GET') { requirePermission(context, 'crm:read'); const result=await db.query('SELECT * FROM crm_layouts WHERE workspace_id=$1 AND entity_type=$2 ORDER BY name',[workspaceId,url.searchParams.get('entityType')??'lead']); sendJson(response,200,{data:result.rows}); return; }
+        if (suffix === 'layouts' && request.method === 'POST') { requirePermission(context, 'workspace:manage'); const input=await body(); const entityType=enumValue(input.entityType??'lead','entityType',['lead']); const active=booleanInput(input.active,'active',true); const result=await transaction(db,async client=>{if(active)await client.query('UPDATE crm_layouts SET active=false,updated_at=now() WHERE workspace_id=$1 AND entity_type=$2',[workspaceId,entityType]);return client.query('INSERT INTO crm_layouts(workspace_id,entity_type,name,config,active) VALUES($1,$2,$3,$4::jsonb,$5) RETURNING *',[workspaceId,entityType,requiredString(input.name,'name',{max:160}),JSON.stringify(objectBody(input.config??{})),active]);}); sendJson(response,201,result.rows[0]); return; }
 
         if (suffix === 'tasks' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
@@ -716,6 +1136,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           const leadId = input.leadId ? uuid(input.leadId, 'leadId') : null;
           if (leadId) await leadVisible(db, context, leadId);
           const assignedTo = input.assignedTo ? uuid(input.assignedTo, 'assignedTo') : current.userId;
+          if (context.role === 'agent' && assignedTo !== current.userId) throw new HttpError(403, 'FORBIDDEN', 'Agents may only assign tasks to themselves.');
+          const assignee = await db.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND active=true', [workspaceId, assignedTo]);
+          if (!assignee.rows[0]) throw new HttpError(400, 'ASSIGNEE_NOT_IN_WORKSPACE', 'Task assignee must be an active workspace member.');
           const result = await db.query(
             `INSERT INTO tasks(workspace_id, lead_id, assigned_to, created_by, title, description, due_at, status, priority, source, task_type, touch_number)
              VALUES($1,$2,$3,$4,$5,$6,$7,'pending',$8,$9,$10,$11) RETURNING *`,
@@ -757,6 +1180,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         if (suffix === 'activities' && request.method === 'GET') {
           requirePermission(context, 'crm:read'); const values = [workspaceId]; const filters = ['workspace_id = $1'];
           if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filters.push(`lead_id = $${values.length}`); }
+          else if (context.role === 'agent') { values.push(current.userId); filters.push(`(user_id = $${values.length} OR (lead_id IS NOT NULL AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=activities.workspace_id AND a.lead_id=activities.lead_id AND a.user_id=$${values.length} AND a.unassigned_at IS NULL)))`); }
           values.push(pageSize(url)); const result = await db.query(`SELECT * FROM activities WHERE ${filters.join(' AND ')} ORDER BY occurred_at DESC, id LIMIT $${values.length}`, values);
           sendJson(response, 200, { data: result.rows }); return;
         }
@@ -774,6 +1198,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         if (suffix === 'meetings' && request.method === 'GET') {
           requirePermission(context, 'crm:read'); const values = [workspaceId]; let filter = 'workspace_id = $1';
+          if (context.role === 'agent') { values.push(current.userId); filter += ` AND owner_user_id = $${values.length}`; }
           if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filter += ` AND lead_id = $${values.length}`; }
           values.push(pageSize(url)); const result = await db.query(`SELECT * FROM meetings WHERE ${filter} ORDER BY starts_at DESC LIMIT $${values.length}`, values);
           sendJson(response, 200, { data: result.rows }); return;
@@ -797,7 +1222,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         const meetingMatch = suffix.match(/^meetings\/([^/]+)$/);
         if (meetingMatch && request.method === 'PATCH') {
           requirePermission(context, 'crm:write'); const meetingId = uuid(meetingMatch[1], 'meetingId'); const input = await body();
-          const existing = await db.query('SELECT starts_at, ends_at FROM meetings WHERE workspace_id=$1 AND id=$2', [workspaceId, meetingId]);
+          const existing = await db.query(`SELECT starts_at, ends_at FROM meetings WHERE workspace_id=$1 AND id=$2 AND ($3 <> 'agent' OR owner_user_id=$4)`, [workspaceId, meetingId, context.role, current.userId]);
           if (!existing.rows[0]) throw new HttpError(404, 'MEETING_NOT_FOUND', 'Meeting was not found.');
           const candidateStart = input.startsAt !== undefined ? isoDate(input.startsAt, 'startsAt') : existing.rows[0].starts_at;
           const candidateEnd = input.endsAt !== undefined ? (input.endsAt ? isoDate(input.endsAt, 'endsAt') : null) : existing.rows[0].ends_at;
@@ -816,6 +1241,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         if (suffix === 'calls' && request.method === 'GET') {
           requirePermission(context, 'crm:read'); const values = [workspaceId]; let filter = 'workspace_id = $1';
           if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filter += ` AND lead_id = $${values.length}`; }
+          else if (context.role === 'agent') { values.push(current.userId); filter += ` AND (user_id = $${values.length} OR (lead_id IS NOT NULL AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=calls.workspace_id AND a.lead_id=calls.lead_id AND a.user_id=$${values.length} AND a.unassigned_at IS NULL)))`; }
           values.push(pageSize(url)); const result = await db.query(`SELECT * FROM calls WHERE ${filter} ORDER BY started_at DESC NULLS LAST, id LIMIT $${values.length}`, values);
           sendJson(response, 200, { data: result.rows }); return;
         }
@@ -845,8 +1271,12 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           requirePermission(context, 'crm:write'); const callId = uuid(callNoteMatch[1], 'callId'); const input = await body();
           const result = await db.query(
             `INSERT INTO call_notes(workspace_id, call_id, author_user_id, note)
-             SELECT $1, id, $3, $4 FROM calls WHERE workspace_id = $1 AND id = $2 RETURNING *`,
-            [workspaceId, callId, current.userId, requiredString(input.note, 'note', { max: 5000 })]
+             SELECT $1, c.id, $3, $4 FROM calls c
+              WHERE c.workspace_id = $1 AND c.id = $2
+                AND ($5 <> 'agent' OR c.user_id = $3 OR (c.lead_id IS NOT NULL AND EXISTS (
+                  SELECT 1 FROM lead_assignments a WHERE a.workspace_id=c.workspace_id AND a.lead_id=c.lead_id AND a.user_id=$3 AND a.unassigned_at IS NULL
+                ))) RETURNING *`,
+            [workspaceId, callId, current.userId, requiredString(input.note, 'note', { max: 5000 }), context.role]
           );
           if (!result.rows[0]) throw new HttpError(404, 'CALL_NOT_FOUND', 'Call was not found.');
           sendJson(response, 201, result.rows[0]); return;
@@ -1007,6 +1437,11 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         const automationMatch = suffix.match(/^automations\/([^/]+)(?:\/(.*))?$/);
         if (automationMatch) {
           requirePermission(context, 'automation:manage'); const automationId = uuid(automationMatch[1], 'automationId'); const action = automationMatch[2] ?? '';
+          if (request.method === 'GET' && !action) {
+            const result = await db.query(`SELECT a.*,v.version_number,v.definition FROM automations a LEFT JOIN automation_versions v ON v.id=a.current_version_id AND v.workspace_id=a.workspace_id WHERE a.workspace_id=$1 AND a.id=$2`,[workspaceId,automationId]);
+            if(!result.rows[0])throw new HttpError(404,'AUTOMATION_NOT_FOUND','Automation was not found.');
+            sendJson(response,200,result.rows[0]);return;
+          }
           if (request.method === 'PATCH' && !action) {
             const input = await body(); const definition = normalizeAutomation(input);
             const updated = await transaction(db, async client => {
@@ -1025,6 +1460,24 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             const input = await body(); const key = parseIdempotency(request);
             const result = await queueAutomationRun(db, { workspaceId, automationId, leadId: input.leadId ? uuid(input.leadId, 'leadId') : null, idempotencyKey: `test:${key}`, actorUserId: current.userId, test: true });
             sendJson(response, 202, result); return;
+          }
+          const runDetailMatch = action.match(/^runs\/([^/]+)$/);
+          if (request.method === 'GET' && runDetailMatch) {
+            const runId = uuid(runDetailMatch[1], 'runId');
+            const run = await db.query(
+              `SELECT r.id,r.lead_id,r.version_id,r.status,r.started_at,r.completed_at,r.error_message,r.attempt_count,r.created_at,
+                      v.version_number,v.definition
+                 FROM automation_runs r
+                 JOIN automation_versions v ON v.workspace_id=r.workspace_id AND v.id=r.version_id
+                WHERE r.workspace_id=$1 AND r.automation_id=$2 AND r.id=$3`,
+              [workspaceId, automationId, runId]
+            );
+            if (!run.rows[0]) throw new HttpError(404, 'AUTOMATION_RUN_NOT_FOUND', 'Automation run was not found.');
+            const steps = await db.query(
+              'SELECT id,position,status,result,completed_at FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 ORDER BY position',
+              [workspaceId, runId]
+            );
+            sendJson(response, 200, { run: run.rows[0], steps: steps.rows }); return;
           }
           if (request.method === 'GET' && action === 'runs') {
             const result = await db.query('SELECT id, lead_id, version_id, status, started_at, completed_at, error_message, attempt_count, created_at FROM automation_runs WHERE workspace_id=$1 AND automation_id=$2 ORDER BY created_at DESC LIMIT $3', [workspaceId, automationId, pageSize(url)]);
@@ -1077,7 +1530,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         const reportMatch = suffix.match(/^reports\/(dashboard|sales|agents|sources)$/);
         if (reportMatch && request.method === 'GET') {
-          requirePermission(context, 'reports:read'); const report = reportMatch[1]; const start = url.searchParams.get('from') ? isoDate(url.searchParams.get('from'), 'from') : new Date(Date.now() - 30 * 86400_000).toISOString();
+          const report = reportMatch[1];
+          requirePermission(context, report === 'dashboard' ? 'crm:read' : 'reports:read');
+          const start = url.searchParams.get('from') ? isoDate(url.searchParams.get('from'), 'from') : new Date(Date.now() - 30 * 86400_000).toISOString();
           const end = url.searchParams.get('to') ? isoDate(url.searchParams.get('to'), 'to') : new Date().toISOString();
           if (report === 'dashboard') {
             const [leads, meetings] = await Promise.all([
@@ -1086,9 +1541,15 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
                         COUNT(*) FILTER (WHERE lower(COALESCE(temperature::text,''))='hot' OR upper(COALESCE(status::text,''))='HOT') AS hot,
                         COUNT(*) FILTER (WHERE upper(COALESCE(status::text,''))='WON') AS won,
                         COUNT(*) FILTER (WHERE upper(COALESCE(status::text,''))='LOST') AS lost
-                   FROM leads WHERE workspace_id=$1 AND deleted_at IS NULL`, [workspaceId]
+                   FROM leads l WHERE l.workspace_id=$1 AND l.deleted_at IS NULL
+                     AND ($2 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL))`,
+                [workspaceId, context.role, current.userId]
               ),
-              db.query('SELECT COUNT(*) AS meetings FROM meetings WHERE workspace_id=$1 AND starts_at >= $2 AND starts_at < $3', [workspaceId, start, end])
+              db.query(
+                `SELECT COUNT(*) AS meetings FROM meetings WHERE workspace_id=$1 AND starts_at >= $2 AND starts_at < $3
+                   AND ($4 <> 'agent' OR owner_user_id=$5)`,
+                [workspaceId, start, end, context.role, current.userId]
+              )
             ]);
             const summary = { ...leads.rows[0], meetings: meetings.rows[0].meetings };
             const decided = Number(summary.won) + Number(summary.lost);
@@ -1283,12 +1744,81 @@ async function queueAutomationRun(db, { workspaceId, automationId, leadId, idemp
   throw new HttpError(404, 'AUTOMATION_NOT_ACTIVE', 'Automation is unavailable or inactive.');
 }
 
+function automationValue(source, path) {
+  return String(path ?? '').split('.').filter(Boolean).reduce((value, key) => value == null ? undefined : value[key], source);
+}
+
+function automationCompare(actual, operator, expected) {
+  if (operator === 'is empty') return actual === undefined || actual === null || actual === '';
+  if (operator === 'is not empty') return !(actual === undefined || actual === null || actual === '');
+  if (operator === 'contains') return Array.isArray(actual) ? actual.includes(expected) : String(actual ?? '').includes(String(expected ?? ''));
+  if (operator === 'does not contain') return Array.isArray(actual) ? !actual.includes(expected) : !String(actual ?? '').includes(String(expected ?? ''));
+  if (operator === 'in') return Array.isArray(expected) && expected.includes(actual);
+  if (operator === 'not in') return Array.isArray(expected) && !expected.includes(actual);
+  if (operator === '=') return actual === expected || String(actual ?? '') === String(expected ?? '');
+  if (operator === '!=') return !(actual === expected || String(actual ?? '') === String(expected ?? ''));
+  const left = Number(actual); const right = Number(expected);
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return false;
+  if (operator === '>') return left > right;
+  if (operator === '>=') return left >= right;
+  if (operator === '<') return left < right;
+  if (operator === '<=') return left <= right;
+  return false;
+}
+
+function automationCondition(node, event) {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return true;
+  if (Array.isArray(node.all)) return node.all.every(item => automationCondition(item, event));
+  if (Array.isArray(node.any)) return node.any.some(item => automationCondition(item, event));
+  if (node.field && node.operator) return automationCompare(automationValue(event, node.field), String(node.operator).toLowerCase(), node.value);
+  return true;
+}
+
 function automationMatches(config, event) {
   if (config.pipelineId && config.pipelineId !== event.pipelineId) return false;
   if (config.fromStageId && config.fromStageId !== event.fromStageId) return false;
   if (config.toStageId && config.toStageId !== event.stageId) return false;
   if (config.status && config.status !== event.status) return false;
+  if (config.all || config.any || (config.field && config.operator)) return automationCondition(config, event);
   return true;
+}
+
+async function applyLeadRules(db, { workspaceId, leadId, actorUserId = null }) {
+  const leadResult = await db.query('SELECT * FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
+  const lead = leadResult.rows[0]; if (!lead) return { scoreChanged: false };
+  const customRows = await db.query(`SELECT d.field_key,v.value FROM lead_custom_fields v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE d.workspace_id=$1 AND v.lead_id=$2`, [workspaceId,leadId]);
+  const custom = Object.fromEntries(customRows.rows.map(row => [row.field_key,row.value]));
+  const context = { ...lead, custom, sourceId: lead.source_id, ownerId: lead.owner_user_id, opportunityType: lead.opportunity_type, brandProject: lead.brand_project };
+  const scoring = await db.query('SELECT conditions,score_delta FROM crm_scoring_rules WHERE workspace_id=$1 AND active=true ORDER BY priority,id', [workspaceId]);
+  let scoreChanged = false;
+  if (scoring.rows.length) {
+    const calculated = scoring.rows.reduce((total, rule) => total + (automationCondition(rule.conditions ?? {}, context) ? Number(rule.score_delta) : 0), 0);
+    const nextScore = Math.max(0, calculated);
+    if (nextScore !== Number(lead.score)) { await db.query('UPDATE leads SET score=$3,updated_at=now() WHERE workspace_id=$1 AND id=$2', [workspaceId, leadId, nextScore]); context.score = nextScore; scoreChanged = true; }
+  }
+  const existing = await db.query('SELECT 1 FROM lead_assignments WHERE lead_id=$1 AND unassigned_at IS NULL', [leadId]);
+  if (!existing.rows[0]) {
+    const rules = await db.query('SELECT * FROM crm_assignment_rules WHERE workspace_id=$1 AND active=true ORDER BY priority,id', [workspaceId]);
+    const rule = rules.rows.find(item => automationCondition(item.conditions ?? {}, context));
+    if (rule && rule.strategy !== 'unassigned') {
+      let userId = rule.config?.userId ?? null;
+      if (rule.strategy === 'round_robin') {
+        const candidate = await db.query(`SELECT wm.user_id,COUNT(a.id)::int AS load FROM workspace_members wm
+          LEFT JOIN lead_assignments a ON a.user_id=wm.user_id AND a.unassigned_at IS NULL
+          WHERE wm.workspace_id=$1 AND wm.active=true AND wm.role IN ('agent','manager')
+          GROUP BY wm.user_id ORDER BY load,wm.user_id LIMIT 1`, [workspaceId]);
+        userId = candidate.rows[0]?.user_id ?? null;
+      }
+      if (userId) {
+        const member = await db.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND active=true', [workspaceId,userId]);
+        if (member.rows[0]) {
+          await db.query('INSERT INTO lead_assignments(workspace_id,lead_id,user_id,assigned_by,reason) VALUES($1,$2,$3,$4,$5)', [workspaceId,leadId,userId,actorUserId,`Rule: ${rule.name}`]);
+          await db.query('UPDATE leads SET owner_user_id=$3,updated_at=now() WHERE workspace_id=$1 AND id=$2', [workspaceId,leadId,userId]);
+        }
+      }
+    }
+  }
+  return { scoreChanged };
 }
 
 export async function dispatchAutomationEvent(db, { workspaceId, eventType, leadId, eventId, actorUserId = null, eventData = {} }) {
@@ -1296,8 +1826,13 @@ export async function dispatchAutomationEvent(db, { workspaceId, eventType, lead
     `SELECT id, trigger_config FROM automations WHERE workspace_id=$1 AND active=true AND trigger_type=$2 ORDER BY created_at`,
     [workspaceId, eventType]
   );
+  let leadContext = {};
+  if (leadId) {
+    const lead = await db.query('SELECT status,score,temperature,budget,source_id,owner_user_id,location,opportunity_type,brand_project FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
+    if (lead.rows[0]) leadContext = { ...lead.rows[0], sourceId: lead.rows[0].source_id, ownerId: lead.rows[0].owner_user_id, opportunityType: lead.rows[0].opportunity_type, brandProject: lead.rows[0].brand_project };
+  }
   for (const automation of automations.rows) {
-    if (!automationMatches(automation.trigger_config ?? {}, eventData)) continue;
+    if (!automationMatches(automation.trigger_config ?? {}, { ...leadContext, ...eventData })) continue;
     await queueAutomationRun(db, {
       workspaceId,
       automationId: automation.id,
@@ -1311,7 +1846,9 @@ export async function dispatchAutomationEvent(db, { workspaceId, eventType, lead
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const server = createRedBlackServer();
-  ensureDefaultAutomations().then(() => server.listen(config.port, '0.0.0.0', () => process.stdout.write(`RedBlack Core listening on ${config.port}\n`))).catch(error => { process.stderr.write(`${error.stack ?? error}\n`); process.exitCode = 1; });
+  ensureDefaultAutomations().then(() => server.listen(config.port, '0.0.0.0', () => process.stdout.write(`RedBlack Core listening on ${config.port}
+`))).catch(error => { process.stderr.write(`${error.stack ?? error}
+`); process.exitCode = 1; });
   const shutdown = async () => { server.close(); await closeDatabase(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }

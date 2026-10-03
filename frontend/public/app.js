@@ -1,9 +1,29 @@
 const $ = selector => document.querySelector(selector);
-const appState = { user: null, workspace: null, workspaces: [], role: null, view: 'dashboard', cursor: null, leadSearch: '', leadStatus: '', toastTimer: null };
+const appState = { user: null, workspace: null, workspaces: [], role: null, view: 'dashboard', cursor: null, leadSearch: '', leadStatus: '', selectedLeads: new Set(), toastTimer: null, csvImportText: null, csvImportFields: [], csvImportErrors: [] };
 const apiRoot = '/api/v1';
+const VIEW_ROLES = Object.freeze({
+  automations: ['owner','admin','manager'],
+  usage: ['owner','admin','manager','reporting'],
+  reports: ['owner','admin','manager','reporting'],
+  workspace: ['owner','admin']
+});
+
+function viewAllowed(view, role) { return !VIEW_ROLES[view] || VIEW_ROLES[view].includes(role); }
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+}
+
+function downloadCsv(filename, headers, rows) {
+  const cell = value => {
+    let text = value == null ? '' : String(value);
+    if (/^[\s\uFEFF]*[=+\-@]/.test(text)) text = `'${text}`;
+    return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  };
+  const content = `\uFEFF${[headers.map(cell).join(','), ...rows.map(row => row.map(cell).join(','))].join('\r\n')}\r\n`;
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }));
+  const link = document.createElement('a'); link.href = url; link.download = filename; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function csrfToken() {
@@ -69,6 +89,8 @@ function switchToApp(session) {
   appState.user = session.user;
   appState.workspace = session.workspace;
   appState.role = session.role;
+  document.querySelectorAll('#mainNav [data-view]').forEach(button => button.classList.toggle('hidden', !viewAllowed(button.dataset.view, appState.role)));
+  if (!viewAllowed(appState.view, appState.role)) appState.view = 'dashboard';
   $('#authView').classList.add('hidden');
   $('#appView').classList.remove('hidden');
   $('#userLabel').textContent = session.user.displayName ?? session.user.email;
@@ -100,16 +122,30 @@ async function boot() {
   }
 }
 
-function renderLeadRows(rows) {
-  if (!rows.length) return '<tr><td colspan="6" class="empty-state">No leads found for this view.</td></tr>';
-  return rows.map(lead => `<tr>
-    <td><div class="lead-name">${escapeHtml([lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</div><div class="lead-sub">${escapeHtml(lead.company_name || lead.email || lead.phone || '')}</div></td>
-    <td>${escapeHtml(lead.brand_project || lead.opportunity_type || '—')}</td>
-    <td>${badge(lead.temperature ?? lead.status)}</td>
-    <td>${lead.budget === null ? '—' : fmtMoney(lead.budget)}</td>
-    <td>${fmtDate(lead.next_action_at, { time: true })}</td>
-    <td><button class="quiet-button" data-action="lead-details" data-id="${escapeHtml(lead.id)}">Open</button></td>
-  </tr>`).join('');
+function renderLeadRows(rows, columns = ['project','status','budget','nextAction']) {
+  if (!rows.length) return `<tr><td colspan="${columns.length + 2}" class="empty-state">No leads found for this view.</td></tr>`;
+  const cell = (lead, column) => {
+    if (column === 'project') return escapeHtml(lead.brand_project || lead.opportunity_type || '—');
+    if (column === 'status') return badge(lead.temperature ?? lead.status);
+    if (column === 'budget') return lead.budget === null ? '—' : fmtMoney(lead.budget);
+    if (column === 'nextAction') return fmtDate(lead.next_action_at, { time: true });
+    if (column === 'owner') return escapeHtml(lead.owner_user_id || '—');
+    if (column === 'score') return escapeHtml(lead.score ?? 0);
+    if (column === 'location') return escapeHtml(lead.location || '—');
+    return '—';
+  };
+  return rows.map(lead => `<tr><td><input type="checkbox" data-action="select-lead" data-id="${escapeHtml(lead.id)}" ${appState.selectedLeads.has(lead.id) ? 'checked' : ''} aria-label="Select lead"><div class="lead-name">${escapeHtml([lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</div><div class="lead-sub">${escapeHtml(lead.company_name || lead.email || lead.phone || '')}</div></td>${columns.map(column => `<td>${cell(lead,column)}</td>`).join('')}<td><button class="quiet-button" data-action="lead-details" data-id="${escapeHtml(lead.id)}">Open</button></td></tr>`).join('');
+}
+
+async function renderToday() {
+  const [tasks, leads] = await Promise.all([api(`${workspacePath('tasks')}?limit=100`), api(`${workspacePath('leads')}?limit=100`)]);
+  const now = new Date(); const day = new Date(now); day.setHours(23,59,59,999);
+  const taskRows = (tasks.data ?? []).filter(t => t.status !== 'completed' && t.status !== 'cancelled').map(t => `<tr><td>${escapeHtml(t.title)}</td><td>${fmtDate(t.due_at, { time: true })}</td><td>${badge(t.status)}</td><td><button class="quiet-button" data-action="complete-task" data-id="${escapeHtml(t.id)}">Complete</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No open follow-ups.</td></tr>';
+  const hot = (leads.data ?? []).filter(l => ['hot','warm'].includes(String(l.temperature).toLowerCase()) || Number(l.score) >= 70).slice(0,20);
+  setPage(`${pageHeading('DAILY SALES DESK', 'Today', 'Prioritize overdue work, follow-ups and high-intent leads.', '<button class="button button-secondary" data-view="tasks">Open tasks</button>')}
+    <section class="metrics"><article class="metric-card"><span class="metric-label">Open follow-ups</span><strong>${fmtNumber((tasks.data ?? []).filter(t => !['completed','cancelled'].includes(t.status)).length)}</strong></article><article class="metric-card"><span class="metric-label">Hot / high score</span><strong>${fmtNumber(hot.length)}</strong></article></section>
+    <section class="panel"><div class="panel-header"><h2 class="panel-title">Follow-up queue</h2></div><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Task</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>${taskRows}</tbody></table></div></div></section>
+    <section class="panel"><div class="panel-header"><h2 class="panel-title">Hot and high-score leads</h2></div><div class="panel-body"><div class="task-list">${hot.map(l => `<button class="task-row" data-action="lead-details" data-id="${escapeHtml(l.id)}"><span class="badge">${escapeHtml(l.temperature || l.score)}</span><span class="task-title">${escapeHtml([l.first_name,l.last_name].filter(Boolean).join(' ') || l.email || 'Lead')}</span><span class="task-due">${escapeHtml(l.status || '')}</span></button>`).join('') || '<div class="empty-state">No hot leads.</div>'}</div></div></section>`);
 }
 
 async function renderDashboard() {
@@ -135,48 +171,93 @@ async function renderDashboard() {
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Pipeline health</h2><p class="panel-subtitle">Open a pipeline to review stages and movement</p></div><button class="button button-secondary button-small" data-view="pipelines">Explore pipelines</button></div><div class="panel-body"><div class="metrics">${(pipelines.data ?? []).map(p => metric(p.name, (p.stages ?? []).length, 'Configured stages')).join('')}</div></div></section>`);
 }
 
+async function renderTrash() {
+  const params = new URLSearchParams({ limit: '50' });
+  if (appState.trashCursor) params.set('cursor', appState.trashCursor);
+  const result = await api(`${workspacePath('leads/trash')}?${params}`);
+  const canRestore = ['owner','admin','manager','agent'].includes(appState.role);
+  const canPurge = ['owner','admin'].includes(appState.role);
+  const rows = (result.data ?? []).map(lead => `<tr><td><div class="lead-name">${escapeHtml([lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</div><div class="lead-sub">${escapeHtml(lead.email || lead.phone || lead.company_name || '')}</div></td><td>${badge(lead.status)}</td><td>${fmtDate(lead.deleted_at, { time: true })}</td><td>${canRestore ? `<button class="quiet-button" data-action="restore-lead" data-id="${escapeHtml(lead.id)}">Restore</button>` : '—'} ${canPurge ? `<button class="quiet-button" data-action="purge-lead" data-id="${escapeHtml(lead.id)}">Delete permanently</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Trash is empty.</td></tr>';
+  setPage(`${pageHeading('DATA SAFETY', 'Lead trash', 'Archived leads remain recoverable and auditable.', '<button class="button button-secondary" data-view="leads">Back to leads</button>')}
+    <section class="panel"><div class="panel-body"><div class="table-wrap"><table><thead><tr><th>Lead</th><th>Status</th><th>Deleted</th><th></th></tr></thead><tbody>${rows}</tbody></table></div><div class="pagination"><button class="button button-secondary button-small" data-action="next-trash" ${result.nextCursor ? '' : 'disabled'} data-cursor="${escapeHtml(result.nextCursor ?? '')}">Load more</button></div></div></section>`);
+}
+
 async function renderLeads() {
   const params = new URLSearchParams({ limit: '50' });
   if (appState.cursor) params.set('cursor', appState.cursor);
   if (appState.leadSearch) params.set('q', appState.leadSearch);
   if (appState.leadStatus) params.set('status', appState.leadStatus);
-  const result = await api(`${workspacePath('leads')}?${params}`);
+  const exportParams = new URLSearchParams();
+  if (appState.leadSearch) exportParams.set('q', appState.leadSearch);
+  if (appState.leadStatus) exportParams.set('status', appState.leadStatus);
+  const exportQuery = exportParams.toString();
+  const exportHref = `${apiRoot}${workspacePath('leads/export')}${exportQuery ? `?${exportQuery}` : ''}`;
+  const memberPromise = ['owner','admin','manager'].includes(appState.role) ? api(workspacePath('members')) : Promise.resolve({data:[]});
+  const [result, fieldDefs, tagCatalog, sources, savedViews, pipelines, members, layouts] = await Promise.all([api(`${workspacePath('leads')}?${params}`), api(`${workspacePath('custom-fields')}?entityType=lead`), api(workspacePath('tags')), api(workspacePath('lead-sources')), api(`${workspacePath('saved-views')}?entityType=lead`), api(workspacePath('pipelines')), memberPromise, api(`${workspacePath('layouts')}?entityType=lead`)]);
+  const leadColumns = layouts.data?.find(layout => layout.active)?.config?.columns ?? ['project','status','budget','nextAction'];
+  const leadColumnLabels = {project:'Project / opportunity',status:'Temperature / status',budget:'Budget',nextAction:'Next action',owner:'Owner',score:'Score',location:'Location'};
   const createAllowed = ['owner','admin','manager','agent'].includes(appState.role);
-  const action = createAllowed ? '<button class="button button-primary" data-action="toggle-new-lead">+ New lead</button>' : '';
+  const action = createAllowed ? `<div class="heading-actions"><button class="button button-secondary" data-action="toggle-import-leads">Import CSV</button><a class="button button-secondary" href="${escapeHtml(exportHref)}">Export CSV</a><button class="button button-primary" data-action="toggle-new-lead">+ New lead</button></div>` : `<a class="button button-secondary" href="${escapeHtml(exportHref)}">Export CSV</a>`;
   setPage(`${pageHeading('CRM', 'Leads', 'Find, qualify and follow up with every opportunity.', action)}
+    <section id="leadImportPanel" class="panel hidden"><div class="panel-header"><div><h2 class="panel-title">Import leads</h2><p class="panel-subtitle">Preview your file, map its columns and review row errors. Matching email addresses or phone numbers are skipped.</p></div><button class="text-button" data-action="toggle-import-leads">Close</button></div><form id="csvImportForm" class="panel-body"><label>CSV file<input id="csvImportFile" name="file" type="file" accept=".csv,text/csv" required></label><div class="heading-actions"><button class="button button-secondary" type="button" data-action="preview-csv-import">Preview columns</button><button id="csvImportSubmit" class="button button-primary hidden" type="submit">Import leads</button></div><div id="csvImportPreview" class="hidden"></div><div id="csvImportResult"></div></form></section>
     <section id="newLeadPanel" class="panel hidden"><div class="panel-header"><div><h2 class="panel-title">Add a lead</h2><p class="panel-subtitle">Contact details and project context</p></div><button class="text-button" data-action="toggle-new-lead">Close</button></div><form id="newLeadForm" class="panel-body"><div class="field-grid">
       <label>First name<input name="firstName" required maxlength="120"></label><label>Last name<input name="lastName" maxlength="120"></label>
       <label>Email<input name="email" type="email" maxlength="320"></label><label>Phone<input name="phone" type="tel" maxlength="80"></label>
       <label>Company<input name="companyName" maxlength="240"></label><label>Project / brand<input name="brandProject" maxlength="240"></label>
       <label>Opportunity type<input name="opportunityType" maxlength="160"></label><label>Budget (INR)<input name="budget" type="number" min="0" step="0.01"></label>
       <label>Status<input name="status" value="New Lead" maxlength="80"></label><label>Next follow-up<input name="nextActionAt" type="datetime-local"></label>
+      <label>Lead source<select name="sourceId"><option value="">—</option>${(sources.data??[]).map(source=>`<option value="${escapeHtml(source.id)}">${escapeHtml(source.name)}</option>`).join('')}</select></label><label>Temperature<select name="temperature"><option value="">—</option><option>hot</option><option>warm</option><option>cold</option></select></label>
       <label class="span-2">Requirement<textarea name="requirement" maxlength="5000"></textarea></label>
-    </div><div class="heading-actions"><button class="button button-primary" type="submit">Save lead</button><button class="button button-secondary" type="reset">Clear</button></div></form></section>
+      ${(fieldDefs.data??[]).filter(field=>field.config?.visible!==false).sort((a,b)=>(a.config?.order??0)-(b.config?.order??0)).map(field=>customFieldControl({...field,value:null})).join('')}
+    </div><div class="panel-body"><strong>Tags</strong><div class="heading-actions">${(tagCatalog.data??[]).map(tag=>`<label class="checkbox-row"><input type="checkbox" data-new-lead-tag value="${escapeHtml(tag.id)}"> ${escapeHtml(tag.name)}</label>`).join('')||'<span class="muted">No tags configured.</span>'}</div></div><div class="heading-actions"><button class="button button-primary" type="submit">Save lead</button><button class="button button-secondary" type="reset">Clear</button></div></form></section>
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Lead directory</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} records on this page</p></div><span class="badge">${escapeHtml(appState.role)}</span></div>
-      <div class="panel-body"><div class="toolbar"><input id="leadSearch" type="search" placeholder="Search name, email, phone or company" value="${escapeHtml(appState.leadSearch)}"><select id="leadStatus"><option value="">All statuses</option>${['New Lead','Contact Attempted','Connected','Qualified','Meeting / Presentation','Proposal','Negotiation','Won','Lost','HOT','WARM','COLD','NO RESPONSE'].map(item => `<option ${appState.leadStatus === item ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('')}</select><button class="button button-secondary button-small" data-action="clear-lead-filters">Clear</button></div>
-      <div class="table-wrap"><table><thead><tr><th>Lead</th><th>Project / opportunity</th><th>Temperature / status</th><th>Budget</th><th>Next action</th><th></th></tr></thead><tbody>${renderLeadRows(result.data ?? [])}</tbody></table></div>
+      <div class="panel-body"><div class="toolbar"><label>Saved view<select id="savedLeadView"><option value="">Current view</option>${(savedViews.data??[]).map(view=>`<option value="${escapeHtml(view.id)}" data-config="${escapeHtml(JSON.stringify(view.config||{}))}">${escapeHtml(view.name)}</option>`).join('')}</select></label><form id="savedViewForm" class="inline-form"><input name="name" placeholder="Save current view as…" required maxlength="160"><button class="button button-secondary button-small">Save view</button></form><label><input type="checkbox" data-action="select-all-leads" aria-label="Select all visible leads"> Select all</label><button class="button button-secondary button-small" data-action="bulk-trash" ${appState.selectedLeads.size ? '' : 'disabled'}>Trash selected</button><select id="bulkStatus" aria-label="Bulk status"><option value="">Bulk status…</option><option>New Lead</option><option>Connected</option><option>Qualified</option><option>Won</option><option>Lost</option></select><select id="bulkStage" aria-label="Bulk stage"><option value="">Bulk stage…</option>${(pipelines.data??[]).flatMap(p=>p.stages.map(s=>`<option value="${escapeHtml(p.id)}|${escapeHtml(s.id)}">${escapeHtml(p.name)} · ${escapeHtml(s.name)}</option>`)).join('')}</select><select id="bulkTag" aria-label="Bulk tag"><option value="">Set tag…</option>${(tagCatalog.data??[]).map(tag=>`<option value="${escapeHtml(tag.id)}">${escapeHtml(tag.name)}</option>`).join('')}</select>${members.data?.length?`<select id="bulkOwner" aria-label="Bulk owner"><option value="">Assign owner…</option>${members.data.filter(m=>m.active).map(m=>`<option value="${escapeHtml(m.id||m.user_id)}">${escapeHtml(m.display_name)}</option>`).join('')}</select>`:''}<input id="leadSearch" type="search" placeholder="Search name, email, phone or company" value="${escapeHtml(appState.leadSearch)}"><select id="leadStatus"><option value="">All statuses</option>${['New Lead','Contact Attempted','Connected','Qualified','Meeting / Presentation','Proposal','Negotiation','Won','Lost','HOT','WARM','COLD','NO RESPONSE'].map(item => `<option ${appState.leadStatus === item ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('')}</select><button class="button button-secondary button-small" data-action="clear-lead-filters">Clear</button></div>
+      <div class="table-wrap"><table><thead><tr><th>Lead</th>${leadColumns.map(column=>`<th>${escapeHtml(leadColumnLabels[column]||column)}</th>`).join('')}<th></th></tr></thead><tbody>${renderLeadRows(result.data ?? [], leadColumns)}</tbody></table></div>
       <div class="pagination"><button class="button button-secondary button-small" data-action="next-leads" ${result.nextCursor ? '' : 'disabled'} data-cursor="${escapeHtml(result.nextCursor ?? '')}">Load more</button></div></div></section>`);
 }
 
+function customFieldControl(field) {
+  const name = `cf:${field.id}`; const value = field.value ?? '';
+  const required = field.required ? 'required' : ''; const disabled = field.config?.readOnly ? 'disabled' : '';
+  if (field.field_type === 'boolean') return `<label class="checkbox-row"><input type="checkbox" name="${escapeHtml(name)}" ${value === true ? 'checked' : ''} ${disabled}> ${escapeHtml(field.label)}</label>`;
+  if (field.field_type === 'textarea') return `<label class="span-2">${escapeHtml(field.label)}<textarea name="${escapeHtml(name)}" ${required} ${disabled}>${escapeHtml(value)}</textarea></label>`;
+  if (['select','multiselect'].includes(field.field_type)) {
+    const options = Array.isArray(field.config?.options) ? field.config.options : [];
+    return `<label>${escapeHtml(field.label)}<select name="${escapeHtml(name)}" ${field.field_type === 'multiselect' ? 'multiple' : ''} ${required} ${disabled}>${options.map(option => `<option value="${escapeHtml(option)}" ${Array.isArray(value) ? (value.includes(option) ? 'selected' : '') : (String(value) === String(option) ? 'selected' : '')}>${escapeHtml(option)}</option>`).join('')}</select></label>`;
+  }
+  const type = ({number:'number',currency:'number',date:'date',datetime:'datetime-local',email:'email',phone:'tel',url:'url'})[field.field_type] || 'text';
+  return `<label>${escapeHtml(field.label)}<input type="${type}" name="${escapeHtml(name)}" value="${escapeHtml(value)}" ${required} ${disabled}></label>`;
+}
+
 async function renderLeadDetail(leadId) {
-  const [lead, timeline] = await Promise.all([api(`${workspacePath(`leads/${encodeURIComponent(leadId)}`)}`), api(`${workspacePath(`leads/${encodeURIComponent(leadId)}/timeline`)}`)]);
+  const [lead, timeline, tagCatalog] = await Promise.all([api(`${workspacePath(`leads/${encodeURIComponent(leadId)}`)}`), api(`${workspacePath(`leads/${encodeURIComponent(leadId)}/timeline`)}`), api(workspacePath('tags'))]);
+  const selectedTags = new Set((lead.tags ?? []).map(tag => tag.id));
+  const customControls = (lead.customFields ?? []).filter(field => field.config?.visible !== false).sort((a,b)=>(a.config?.order??0)-(b.config?.order??0)).map(customFieldControl).join('');
+  const tagControls = (tagCatalog.data ?? []).map(tag => `<label class="checkbox-row"><input type="checkbox" data-lead-tag value="${escapeHtml(tag.id)}" ${selectedTags.has(tag.id) ? 'checked' : ''}> ${escapeHtml(tag.name)}</label>`).join('') || '<span class="muted">No workspace tags configured.</span>';
   setPage(`${pageHeading('LEAD RECORD', [lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Lead details', lead.company_name || lead.email || lead.phone || '')}
-    <section class="panel"><div class="panel-header"><h2 class="panel-title">Contact and qualification</h2><button class="button button-secondary button-small" data-view="leads">Back to leads</button></div><div class="panel-body"><dl class="key-value"><dt>Email</dt><dd>${escapeHtml(lead.email || '—')}</dd><dt>Phone</dt><dd>${escapeHtml(lead.phone || '—')}</dd><dt>Project</dt><dd>${escapeHtml(lead.brand_project || '—')}</dd><dt>Opportunity type</dt><dd>${escapeHtml(lead.opportunity_type || '—')}</dd><dt>Budget</dt><dd>${lead.budget === null ? '—' : fmtMoney(lead.budget)}</dd><dt>Status</dt><dd>${badge(lead.status)}</dd><dt>Temperature</dt><dd>${badge(lead.temperature)}</dd><dt>Next action</dt><dd>${escapeHtml(lead.next_action || '—')} · ${fmtDate(lead.next_action_at, { time: true })}</dd><dt>Notes</dt><dd>${escapeHtml(lead.notes || '—')}</dd></dl></div></section>
+    <section class="panel"><div class="panel-header"><h2 class="panel-title">Contact and qualification</h2><div><button class="button button-secondary button-small" data-action="toggle-lead-edit">Edit</button> <button class="button button-secondary button-small" data-view="leads">Back to leads</button></div></div><div id="leadEditPanel" class="panel-body hidden"><form id="leadEditForm" data-lead-id="${escapeHtml(lead.id)}"><div class="field-grid"><label>First name<input name="firstName" value="${escapeHtml(lead.first_name || '')}"></label><label>Last name<input name="lastName" value="${escapeHtml(lead.last_name || '')}"></label><label>Email<input name="email" type="email" value="${escapeHtml(lead.email || '')}"></label><label>Phone<input name="phone" value="${escapeHtml(lead.phone || '')}"></label><label>Status<input name="status" value="${escapeHtml(lead.status || '')}"></label><label>Score<input name="score" type="number" value="${escapeHtml(lead.score ?? 0)}"></label><label>Temperature<select name="temperature"><option value="">—</option>${['hot','warm','cold'].map(v => `<option value="${v}" ${lead.temperature === v ? 'selected' : ''}>${v}</option>`).join('')}</select></label><label>Budget<input name="budget" type="number" value="${escapeHtml(lead.budget ?? '')}"></label><label>Next action<input name="nextAction" value="${escapeHtml(lead.next_action || '')}"></label><label>Next follow-up<input name="nextActionAt" type="datetime-local" value="${lead.next_action_at ? escapeHtml(new Date(lead.next_action_at).toISOString().slice(0,16)) : ''}"></label><label class="span-2">Notes<textarea name="notes">${escapeHtml(lead.notes || '')}</textarea></label>${customControls}</div><div class="panel-body"><strong>Tags</strong><div class="heading-actions">${tagControls}</div></div><button class="button button-primary" type="submit">Save changes</button></form></div><div class="panel-body"><dl class="key-value"><dt>Email</dt><dd>${escapeHtml(lead.email || '—')}</dd><dt>Phone</dt><dd>${escapeHtml(lead.phone || '—')}</dd><dt>Project</dt><dd>${escapeHtml(lead.brand_project || '—')}</dd><dt>Opportunity type</dt><dd>${escapeHtml(lead.opportunity_type || '—')}</dd><dt>Budget</dt><dd>${lead.budget === null ? '—' : fmtMoney(lead.budget)}</dd><dt>Status</dt><dd>${badge(lead.status)}</dd><dt>Temperature</dt><dd>${badge(lead.temperature)}</dd><dt>Next action</dt><dd>${escapeHtml(lead.next_action || '—')} · ${fmtDate(lead.next_action_at, { time: true })}</dd><dt>Tags</dt><dd>${(lead.tags ?? []).map(tag => badge(tag.name)).join(' ') || '—'}</dd><dt>Notes</dt><dd>${escapeHtml(lead.notes || '—')}</dd></dl></div></section>
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Timeline</h2><p class="panel-subtitle">Recent calls, tasks, messages and notes</p></div></div><div class="panel-body">${(timeline.data ?? []).map(item => `<div class="task-row"><span class="badge">${escapeHtml(item.item_type)}</span><div><div class="task-title">${escapeHtml(item.title)}</div><div class="task-meta">${escapeHtml(item.body || item.kind || '')}</div></div><div class="task-due">${fmtDate(item.happened_at, { time: true })}</div></div>`).join('') || '<div class="empty-state">No timeline events yet.</div>'}</div></section>`);
 }
 
-async function renderPipelines() {
+async function renderPipelines(selectedPipelineId = null) {
   const [pipelines, leads] = await Promise.all([api(workspacePath('pipelines')), api(`${workspacePath('leads')}?limit=100`)]);
-  const first = pipelines.data?.[0];
+  const first = pipelines.data?.find(item => item.id === selectedPipelineId) ?? pipelines.data?.[0];
+  const canManage = ['owner','admin'].includes(appState.role);
   const cards = (leads.data ?? []).map(lead => ({ lead, current: null }));
   if (first) {
     const board = first.stages.map(stage => {
-      const matching = cards.filter(({ lead }) => (lead.status || '').toLowerCase() === stage.name.toLowerCase() || (stage.slug === 'new-lead' && (lead.status || '').toLowerCase() === 'new lead'));
-      return `<div class="pipeline-column"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(({ lead }) => `<article class="pipeline-card"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(first.id)}"><option value="">Move to stage…</option>${first.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
+      const matching = cards.filter(({ lead }) => lead.current_stage_id ? lead.current_stage_id === stage.id : ((lead.status || '').toLowerCase() === stage.name.toLowerCase() || (stage.slug === 'new-lead' && (lead.status || '').toLowerCase() === 'new lead')));
+      return `<div class="pipeline-column" data-drop-stage="${escapeHtml(stage.id)}" data-drop-pipeline="${escapeHtml(first.id)}"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(({ lead }) => `<article class="pipeline-card" draggable="true" data-drag-lead="${escapeHtml(lead.id)}"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(first.id)}"><option value="">Move to stage…</option>${first.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
     }).join('');
     setPage(`${pageHeading('OPPORTUNITY FLOW', 'Pipelines', 'Move every opportunity forward with a clear next step.')}
-      <section class="panel"><div class="panel-header"><div><h2 class="panel-title">${escapeHtml(first.name)}</h2><p class="panel-subtitle">Showing up to 100 active leads. Stage changes are recorded in history.</p></div><select id="pipelineChoice">${pipelines.data.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === first.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="panel-body"><div class="pipeline-board">${board}</div></div></section>`);
-    $('#pipelineChoice').addEventListener('change', () => renderPipelineChoice(pipelines.data, $('#pipelineChoice').value));
+      <section class="panel"><div class="panel-header"><div><h2 class="panel-title">${escapeHtml(first.name)}</h2><p class="panel-subtitle">Showing up to 100 active leads. Drag lead cards between stages; movement is recorded in history.</p></div><select id="pipelineChoice">${pipelines.data.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === first.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="panel-body"><div class="pipeline-board">${board}</div></div></section>${canManage ? `<section class="panel"><div class="panel-header"><div><h2 class="panel-title">Pipeline builder</h2><p class="panel-subtitle">Edit the selected pipeline and its stage definitions.</p></div></div><div class="panel-body">
+        <form id="pipelineEditForm" data-pipeline-id="${escapeHtml(first.id)}" class="inline-form"><label>Name<input name="name" value="${escapeHtml(first.name)}" required maxlength="120"></label><label>Slug<input name="slug" value="${escapeHtml(first.slug)}" required maxlength="120"></label><label class="checkbox-row"><input name="active" type="checkbox" ${first.active?'checked':''}> Active</label><button class="button button-primary">Save pipeline</button></form>
+        <div class="table-wrap"><table><thead><tr><th>Stage</th><th>Settings</th></tr></thead><tbody>${first.stages.map(stage=>`<tr><td><strong>${escapeHtml(stage.name)}</strong><div class="lead-sub">Position ${escapeHtml(stage.position)}</div></td><td><form data-stage-edit-form data-pipeline-id="${escapeHtml(first.id)}" data-stage-id="${escapeHtml(stage.id)}" class="inline-form"><label>Name<input name="name" value="${escapeHtml(stage.name)}" required maxlength="120"></label><label>Slug<input name="slug" value="${escapeHtml(stage.slug)}" required maxlength="120"></label><label>Position<input name="position" type="number" min="0" value="${escapeHtml(stage.position)}" required></label><label class="checkbox-row"><input name="isWon" type="checkbox" ${stage.isWon?'checked':''}> Won</label><label class="checkbox-row"><input name="isLost" type="checkbox" ${stage.isLost?'checked':''}> Lost</label><button class="button button-secondary button-small">Save stage</button></form></td></tr>`).join('')}</tbody></table></div>
+        <hr><form id="pipelineForm" class="inline-form"><label>New pipeline name<input name="name" required maxlength="120"></label><label>Slug<input name="slug" required maxlength="120"></label><button class="button button-secondary">Create pipeline</button></form>
+        <form id="stageForm" class="inline-form"><input type="hidden" name="pipelineId" value="${escapeHtml(first.id)}"><label>New stage name<input name="name" required maxlength="120"></label><label>Slug<input name="slug" required maxlength="120"></label><label>Position<input name="position" type="number" min="0" value="${first.stages.length}"></label><label class="checkbox-row"><input name="isWon" type="checkbox"> Won</label><label class="checkbox-row"><input name="isLost" type="checkbox"> Lost</label><button class="button button-secondary">Add stage</button></form>
+      </div></section>` : ''}`);
+    $('#pipelineChoice').addEventListener('change', () => renderPipelines($('#pipelineChoice').value));
+    bindPipelineDnD();
   } else setPage(`${pageHeading('OPPORTUNITY FLOW', 'Pipelines', 'No pipelines are available yet.')}<section class="panel"><div class="empty-state">Ask a workspace admin to create a pipeline.</div></section>`);
 }
 
@@ -185,19 +266,72 @@ async function renderPipelineChoice(all, pipelineId) {
   if (!pipeline) return;
   const leads = await api(`${workspacePath('leads')}?pipelineId=${encodeURIComponent(pipelineId)}&limit=100`);
   const board = pipeline.stages.map(stage => {
-    const matching = (leads.data ?? []).filter(lead => (lead.status || '').toLowerCase() === stage.name.toLowerCase() || (stage.slug === 'new-lead' && (lead.status || '').toLowerCase() === 'new lead'));
-    return `<div class="pipeline-column"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(lead => `<article class="pipeline-card"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(pipeline.id)}"><option value="">Move to stage…</option>${pipeline.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
+    const matching = (leads.data ?? []).filter(lead => lead.current_stage_id ? lead.current_stage_id === stage.id : ((lead.status || '').toLowerCase() === stage.name.toLowerCase() || (stage.slug === 'new-lead' && (lead.status || '').toLowerCase() === 'new lead')));
+    return `<div class="pipeline-column" data-drop-stage="${escapeHtml(stage.id)}" data-drop-pipeline="${escapeHtml(pipeline.id)}"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(lead => `<article class="pipeline-card" draggable="true" data-drag-lead="${escapeHtml(lead.id)}"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(pipeline.id)}"><option value="">Move to stage…</option>${pipeline.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
   }).join('');
   $('.pipeline-board').innerHTML = board;
+  bindPipelineDnD();
+}
+
+function bindPipelineDnD() {
+  document.querySelectorAll('[data-drag-lead]').forEach(card => card.addEventListener('dragstart', event => {
+    event.dataTransfer.setData('text/plain', card.dataset.dragLead);
+    event.dataTransfer.effectAllowed = 'move';
+  }));
+  document.querySelectorAll('[data-drop-stage]').forEach(column => {
+    column.addEventListener('dragover', event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; });
+    column.addEventListener('drop', async event => {
+      event.preventDefault(); const leadId = event.dataTransfer.getData('text/plain');
+      if (!leadId) return;
+      try {
+        await api(`${workspacePath(`leads/${encodeURIComponent(leadId)}/stage`)}`, { method: 'POST', body: { pipelineId: column.dataset.dropPipeline, stageId: column.dataset.dropStage } });
+        showToast('Lead moved.'); await renderPipelines();
+      } catch (error) { showToast(error.message, 'error'); }
+    });
+  });
 }
 
 async function renderTasks() {
-  const result = await api(`${workspacePath('tasks')}?limit=100`);
-  const rows = (result.data ?? []).map(task => `<tr><td><div class="lead-name">${escapeHtml(task.title)}</div><div class="lead-sub">${escapeHtml(task.task_type || task.source || 'Follow-up')}</div></td><td>${fmtDate(task.due_at, { time: true })}</td><td>${badge(task.status)}</td><td>${escapeHtml(task.priority)}</td><td>${task.status === 'completed' || task.status === 'cancelled' ? '—' : `<button class="quiet-button" data-action="complete-task" data-id="${escapeHtml(task.id)}">Complete</button>`}</td></tr>`).join('') || '<tr><td colspan="5" class="empty-state">No tasks found.</td></tr>';
+  const [result, taskTypes] = await Promise.all([api(`${workspacePath('tasks')}?limit=100`), api(workspacePath('task-types'))]);
+  appState.taskCache = result.data ?? [];
   const canWrite = ['owner','admin','manager','agent'].includes(appState.role);
-  setPage(`${pageHeading('FOLLOW-UP WORK', 'Tasks & activities', 'Keep next actions visible and close the loop with every lead.', canWrite ? '<button class="button button-primary" data-action="toggle-task-form">+ New task</button>' : '')}
-    <section id="taskFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Create a follow-up</h2><button class="text-button" data-action="toggle-task-form">Close</button></div><form id="taskForm" class="panel-body"><div class="field-grid"><label>Lead ID (optional)<input name="leadId" maxlength="36"></label><label>Task type<select name="taskType"><option>CALL</option><option>WHATSAPP</option><option>MEETING</option><option>EMAIL</option><option>OTHER</option></select></label><label class="span-2">Title<input name="title" required maxlength="240"></label><label>Due date<input name="dueAt" type="datetime-local"></label><label>Priority<input name="priority" type="number" value="0" min="0" max="10"></label><label class="span-2">Notes<textarea name="description" maxlength="5000"></textarea></label></div><button class="button button-primary">Save task</button></form></section>
-    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Task queue</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} records</p></div></div><div class="table-wrap"><table><thead><tr><th>Task</th><th>Due</th><th>Status</th><th>Priority</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
+  const rows = appState.taskCache.map(task => {
+    const terminal = ['completed','cancelled'].includes(task.status);
+    const actions = !canWrite ? '—' : (terminal
+      ? `<button class="quiet-button" data-action="task-status" data-status="pending" data-id="${escapeHtml(task.id)}">Reopen</button>`
+      : `<button class="quiet-button" data-action="complete-task" data-id="${escapeHtml(task.id)}">Complete</button> <button class="quiet-button" data-action="task-status" data-status="cancelled" data-id="${escapeHtml(task.id)}">Cancel</button>`);
+    return `<tr><td><div class="lead-name">${escapeHtml(task.title)}</div><div class="lead-sub">${escapeHtml(task.task_type || task.source || 'Follow-up')}</div></td><td>${fmtDate(task.due_at, { time: true })}</td><td>${badge(task.status)}</td><td>${escapeHtml(task.priority)}</td><td>${canWrite ? `<button class="quiet-button" data-action="edit-task" data-id="${escapeHtml(task.id)}">Edit</button>` : ''} ${actions}</td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="empty-state">No tasks found.</td></tr>';
+  setPage(`${pageHeading('FOLLOW-UP WORK', 'Tasks & activities', 'Create, edit, complete, cancel and reopen follow-ups.', canWrite ? '<button class="button button-primary" data-action="toggle-task-form">+ New task</button>' : '')}
+    <section id="taskFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Create a follow-up</h2><button class="text-button" data-action="toggle-task-form">Close</button></div><form id="taskForm" class="panel-body"><div class="field-grid"><label>Lead ID (optional)<input name="leadId" maxlength="36"></label><label>Task type<select name="taskType">${['CALL','WHATSAPP','MEETING','EMAIL','OTHER',...(taskTypes.data??[]).map(item=>item.name)].filter((value,index,array)=>array.indexOf(value)===index).map(value=>`<option>${escapeHtml(value)}</option>`).join('')}</select></label><label class="span-2">Title<input name="title" required maxlength="240"></label><label>Due date<input name="dueAt" type="datetime-local"></label><label>Priority<input name="priority" type="number" value="0" min="0" max="10"></label><label class="span-2">Notes<textarea name="description" maxlength="5000"></textarea></label></div><button class="button button-primary">Save task</button></form></section>
+    <section id="taskEditPanel" class="panel hidden"></section>
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Task queue</h2><p class="panel-subtitle">${fmtNumber(appState.taskCache.length)} records</p></div></div><div class="table-wrap"><table><thead><tr><th>Task</th><th>Due</th><th>Status</th><th>Priority</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
+}
+
+function openTaskEditor(taskId) {
+  const task = (appState.taskCache ?? []).find(item => item.id === taskId);
+  if (!task) return;
+  const panel = $('#taskEditPanel');
+  const due = task.due_at ? new Date(task.due_at).toISOString().slice(0,16) : '';
+  panel.innerHTML = `<div class="panel-header"><h2 class="panel-title">Edit task</h2><button class="text-button" data-action="close-task-edit">Close</button></div><form id="taskEditForm" data-task-id="${escapeHtml(task.id)}" class="panel-body"><div class="field-grid"><label class="span-2">Title<input name="title" value="${escapeHtml(task.title)}" required maxlength="240"></label><label>Due date<input name="dueAt" type="datetime-local" value="${escapeHtml(due)}"></label><label>Priority<input name="priority" type="number" min="0" max="10" value="${escapeHtml(task.priority ?? 0)}"></label><label>Status<select name="status">${['pending','in_progress','completed','cancelled'].map(value => `<option value="${value}" ${task.status === value ? 'selected' : ''}>${value}</option>`).join('')}</select></label><label class="span-2">Notes<textarea name="description" maxlength="5000">${escapeHtml(task.description || '')}</textarea></label></div><button class="button button-primary">Save task</button></form>`;
+  panel.classList.remove('hidden');
+}
+
+async function renderMeetings() {
+  const [meetings, leads] = await Promise.all([api(`${workspacePath('meetings')}?limit=100`), api(`${workspacePath('leads')}?limit=100`)]);
+  const canWrite = ['owner','admin','manager','agent'].includes(appState.role);
+  appState.meetingCache = meetings.data ?? [];
+  const rows = appState.meetingCache.map(item => `<tr><td>${fmtDate(item.starts_at, { time: true })}</td><td>${escapeHtml(item.meeting_type || 'Meeting')}</td><td>${badge(item.status)}</td><td>${escapeHtml(item.notes || '—')}</td><td>${canWrite ? `<button class="quiet-button" data-action="edit-meeting" data-id="${escapeHtml(item.id)}">Edit</button> <button class="quiet-button" data-action="meeting-status" data-status="completed" data-id="${escapeHtml(item.id)}">Complete</button> <button class="quiet-button" data-action="meeting-status" data-status="missed" data-id="${escapeHtml(item.id)}">Missed</button> <button class="quiet-button" data-action="meeting-status" data-status="cancelled" data-id="${escapeHtml(item.id)}">Cancel</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty-state">No meetings scheduled.</td></tr>';
+  setPage(`${pageHeading('APPOINTMENTS', 'Meetings & calendar', 'Schedule appointments and record completed, missed or cancelled outcomes.')}
+    ${canWrite ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Schedule meeting</h2></div><form id="meetingForm" class="panel-body"><div class="field-grid"><label>Lead<select name="leadId"><option value="">No linked lead</option>${(leads.data ?? []).map(lead => `<option value="${escapeHtml(lead.id)}">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || lead.email || lead.phone || lead.id)}</option>`).join('')}</select></label><label>Type<input name="meetingType" value="Consultation" maxlength="120"></label><label>Starts<input name="startsAt" type="datetime-local" required></label><label>Ends<input name="endsAt" type="datetime-local"></label><label class="span-2">Notes<textarea name="notes" maxlength="5000"></textarea></label></div><button class="button button-primary">Schedule meeting</button></form></section>` : ''}
+    <section id="meetingEditPanel" class="panel hidden"></section>
+    <section class="panel"><div class="panel-header"><h2 class="panel-title">Calendar queue</h2><span class="badge">${fmtNumber(meetings.data?.length ?? 0)}</span></div><div class="table-wrap"><table><thead><tr><th>When</th><th>Type</th><th>Status</th><th>Notes</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
+}
+
+function openMeetingEditor(meetingId) {
+  const item=(appState.meetingCache??[]).find(meeting=>meeting.id===meetingId); if(!item)return;
+  const panel=$('#meetingEditPanel'); const start=item.starts_at?new Date(item.starts_at).toISOString().slice(0,16):''; const end=item.ends_at?new Date(item.ends_at).toISOString().slice(0,16):'';
+  panel.innerHTML=`<div class="panel-header"><h2 class="panel-title">Edit meeting</h2><button class="text-button" data-action="close-meeting-edit">Close</button></div><form id="meetingEditForm" data-meeting-id="${escapeHtml(item.id)}" class="panel-body"><div class="field-grid"><label>Type<input name="meetingType" value="${escapeHtml(item.meeting_type||'')}"></label><label>Status<select name="status">${['scheduled','completed','missed','cancelled'].map(v=>`<option ${item.status===v?'selected':''}>${v}</option>`).join('')}</select></label><label>Starts<input name="startsAt" type="datetime-local" value="${escapeHtml(start)}" required></label><label>Ends<input name="endsAt" type="datetime-local" value="${escapeHtml(end)}"></label><label class="span-2">Notes<textarea name="notes">${escapeHtml(item.notes||'')}</textarea></label></div><button class="button button-primary">Save meeting</button></form>`; panel.classList.remove('hidden');
 }
 
 async function renderCommunications() {
@@ -221,14 +355,54 @@ async function renderCalling() {
     <section class="panel"><div class="panel-header"><h2 class="panel-title">Call history</h2></div><div class="table-wrap"><table><thead><tr><th>Direction</th><th>Provider</th><th>Status</th><th>Started</th><th>Duration</th><th>Disposition</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
 }
 
+const automationActionTypes = ['create_task','create_activity','change_stage','create_message_draft','wait','update_lead','assign_owner','create_note','invoke_ai','schedule_follow_up','send_communication','start_call'];
+
+function automationDefaultConfig(type) {
+  if (type === 'create_task') return { title: 'Follow up', dueInMinutes: 60, assignTo: 'owner' };
+  if (type === 'create_activity' || type === 'create_note') return { title: 'Automation activity', body: '' };
+  if (type === 'wait') return { minutes: 60 };
+  if (type === 'schedule_follow_up') return { title: 'Follow up', dueInMinutes: 60 };
+  if (type === 'call_webhook') return { url: 'https://', method: 'POST' };
+  if (type === 'notify_user') return { message: 'Follow-up required' };
+  if (type === 'create_message_draft') return { channel: 'whatsapp', body: 'Follow-up message' };
+  return {};
+}
+
+function renderAutomationSteps() {
+  const root = $('#automationSteps'); if (!root) return;
+  root.innerHTML = (appState.automationSteps ?? []).map((step, index) => `<article class="pipeline-card" draggable="true" data-automation-step="${index}"><div class="panel-header"><div><span class="badge">STEP ${index + 1}</span> <strong>${escapeHtml(step.type)}</strong></div><button type="button" class="text-button" data-action="remove-automation-step" data-index="${index}">Remove</button></div><label>Configuration JSON<textarea data-step-config="${index}" rows="4">${escapeHtml(JSON.stringify(step.config, null, 2))}</textarea></label></article>`).join('') || '<div class="empty-state">Add at least one action from the palette.</div>';
+  root.querySelectorAll('[data-automation-step]').forEach(card => card.addEventListener('dragstart', event => event.dataTransfer.setData('text/plain', card.dataset.automationStep)));
+  root.addEventListener('dragover', event => event.preventDefault());
+  root.addEventListener('drop', event => {
+    event.preventDefault(); const from = Number(event.dataTransfer.getData('text/plain')); const target = event.target.closest('[data-automation-step]'); if (!Number.isInteger(from) || !target) return;
+    const to = Number(target.dataset.automationStep); if (from === to) return;
+    const [moved] = appState.automationSteps.splice(from, 1); appState.automationSteps.splice(to, 0, moved); renderAutomationSteps();
+  }, { once: true });
+}
+
+async function loadAutomationEditor(automationId, clone = false) {
+  const item=await api(`${workspacePath(`automations/${encodeURIComponent(automationId)}`)}`); const definition=item.definition??{};
+  appState.automationEditingId=clone?null:automationId; appState.automationSteps=(definition.actions??[]).map(step=>({type:step.type,config:step.config??{}}));
+  $('#automationFormPanel')?.classList.remove('hidden'); const form=$('#automationForm'); if(!form)return;
+  form.elements.name.value=clone?`${definition.name||item.name} copy`:(definition.name||item.name||'');
+  form.elements.description.value=definition.description||item.description||''; form.elements.triggerType.value=definition.triggerType||item.trigger_type||'manual';
+  form.elements.conditions.value=JSON.stringify(definition.triggerConfig??item.trigger_config??{},null,2); form.elements.active.checked=clone?false:Boolean(item.active); renderAutomationSteps();
+}
+
 async function renderAutomations() {
   const result = await api(`${workspacePath('automations')}`);
   const canManage = ['owner','admin','manager'].includes(appState.role);
-  const rows = (result.data ?? []).map(item => `<tr><td><div class="lead-name">${escapeHtml(item.name)}</div><div class="lead-sub">v${escapeHtml(item.current_version_id?.slice(0,8) || '—')} · ${escapeHtml(item.description || '')}</div></td><td>${badge(item.trigger_type)}</td><td>${badge(item.active ? 'active' : 'inactive')}</td><td><button class="quiet-button" data-action="run-automation" data-id="${escapeHtml(item.id)}">Queue run</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Add a workflow to automate a task, stage change or message draft.</td></tr>';
-  setPage(`${pageHeading('WORKFLOW ENGINE', 'Automations', 'Versioned workflows run in the background with retries and an audit trail.', canManage ? '<button class="button button-primary" data-action="toggle-automation-form">+ New automation</button>' : '')}
-    <div class="notice">Allowed actions create a task, add an activity, change a pipeline stage or prepare a message draft. External sends stay behind consent checks and a configured provider adapter.</div>
-    <section id="automationFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Create automation</h2><button class="text-button" data-action="toggle-automation-form">Close</button></div><form id="automationForm" class="panel-body"><div class="field-grid"><label>Name<input name="name" required maxlength="160"></label><label>Trigger<select name="triggerType"><option>manual</option><option>lead.created</option><option>lead.stage_changed</option><option>task.completed</option><option>meeting.created</option><option>call.ended</option></select></label><label>Description<input name="description" maxlength="500"></label><label>Action<select name="actionType"><option value="create_task">Create a task</option><option value="create_activity">Add an activity</option><option value="create_message_draft">Create a message draft</option></select></label><label class="span-2">Action title / message<textarea name="actionText" required maxlength="10000"></textarea></label></div><label class="checkbox-row"><input name="active" type="checkbox" class="checkbox-input"> Activate after saving</label><button class="button button-primary">Save version 1</button></form></section>
-    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Workflows</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} workflows</p></div></div><div class="table-wrap"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
+  if (!Array.isArray(appState.automationSteps) || !appState.automationSteps.length) appState.automationSteps = [{ type: 'create_task', config: automationDefaultConfig('create_task') }];
+  const rows = (result.data ?? []).map(item => `<tr><td><div class="lead-name">${escapeHtml(item.name)}</div><div class="lead-sub">v${escapeHtml(item.current_version_id?.slice(0,8) || '—')} · ${escapeHtml(item.description || '')}</div></td><td>${badge(item.trigger_type)}</td><td>${badge(item.active ? 'active' : 'inactive')}</td><td><button class="quiet-button" data-action="edit-automation" data-id="${escapeHtml(item.id)}">Edit</button> <button class="quiet-button" data-action="clone-automation" data-id="${escapeHtml(item.id)}">Clone</button> <button class="quiet-button" data-action="test-automation" data-id="${escapeHtml(item.id)}">Test</button> <button class="quiet-button" data-action="run-automation" data-id="${escapeHtml(item.id)}">Queue run</button> <button class="quiet-button" data-action="automation-runs" data-id="${escapeHtml(item.id)}">Run history</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Add a workflow to automate sales work.</td></tr>';
+  setPage(`${pageHeading('WORKFLOW ENGINE', 'Automations', 'Build versioned workflows visually; drag actions to reorder execution.', canManage ? '<button class="button button-primary" data-action="toggle-automation-form">+ New automation</button>' : '')}
+    <div class="notice">Published workflow definitions are versioned. Provider-backed actions remain behind consent, configuration and idempotency controls.</div>
+    <section id="automationFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Visual automation builder</h2><button class="text-button" data-action="toggle-automation-form">Close</button></div><form id="automationForm" class="panel-body"><div class="field-grid"><label>Name<input name="name" required maxlength="160"></label><label>Trigger<select name="triggerType"><option>manual</option><option>lead.created</option><option>lead.updated</option><option>form.submitted</option><option>lead.stage_changed</option><option>message.incoming</option><option>email.incoming</option><option>appointment.created</option><option>appointment.missed</option><option>task.completed</option><option>meeting.created</option><option>meeting.missed</option><option>call.completed</option><option>call.ended</option><option>lead.no_response</option><option>lead.score_changed</option><option>scheduled.time</option><option>webhook.received</option><option>ai.decision</option></select></label><label class="span-2">Description<input name="description" maxlength="500"></label><label class="span-2">Trigger / condition JSON<textarea name="conditions" placeholder='{"all":[{"field":"score","operator":">=","value":70}]}'></textarea></label></div>
+      <div class="panel-header"><div><h3 class="panel-title">Action palette</h3><p class="panel-subtitle">Add actions, then drag cards to change execution order.</p></div></div><div class="heading-actions">${automationActionTypes.map(type => `<button type="button" class="button button-secondary button-small" data-action="add-automation-step" data-type="${type}">+${escapeHtml(type.replaceAll('_',' '))}</button>`).join('')}</div>
+      <div id="automationSteps" class="panel-body"></div>
+      <label class="checkbox-row"><input name="active" type="checkbox" class="checkbox-input"> Activate after saving</label><button class="button button-primary">Save workflow version</button></form></section>
+    <section id="automationRunPanel" class="panel hidden"></section>
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Workflows</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} workflows</p></div></div><div class="table-wrap"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
+  renderAutomationSteps();
 }
 
 async function renderUsage() {
@@ -252,24 +426,57 @@ async function renderReports() {
       <article class="panel"><div class="panel-header"><h2 class="panel-title">Lead sources</h2></div><div class="table-wrap"><table><thead><tr><th>Source</th><th>Leads</th><th>Won</th><th>Qualified</th></tr></thead><tbody>${(sources.data ?? []).map(row => `<tr><td>${escapeHtml(row.source)}</td><td>${fmtNumber(row.leads)}</td><td>${fmtNumber(row.won)}</td><td>${fmtNumber(row.qualified)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">No source data yet.</td></tr>'}</tbody></table></div></article></section>`);
 }
 
+function openCustomFieldEditor(fieldId) {
+  const field=(appState.customFieldCache??[]).find(item=>item.id===fieldId); if(!field)return;
+  const config=field.config??{}; const panel=$('#customFieldEditPanel'); if(!panel)return;
+  panel.innerHTML=`<div class="panel-header"><div><h2 class="panel-title">Edit custom field</h2><p class="panel-subtitle"><code>${escapeHtml(field.field_key)}</code> · ${escapeHtml(field.field_type)}</p></div><button class="text-button" data-action="close-custom-field-edit">Close</button></div>
+    <form id="customFieldEditForm" data-field-id="${escapeHtml(field.id)}" class="panel-body"><div class="field-grid">
+      <label>Label<input name="label" value="${escapeHtml(field.label)}" required maxlength="160"></label>
+      <label>Section<input name="section" value="${escapeHtml(config.section??'Details')}" maxlength="120"></label>
+      <label>Order<input name="order" type="number" min="0" value="${escapeHtml(config.order??0)}"></label>
+      <label class="span-2">Options (comma-separated)<input name="options" value="${escapeHtml((config.options??[]).join(', '))}" maxlength="1000"></label>
+      <label class="checkbox-row"><input name="required" type="checkbox" class="checkbox-input" ${field.required?'checked':''}> Required</label>
+      <label class="checkbox-row"><input name="visible" type="checkbox" class="checkbox-input" ${config.visible===false?'':'checked'}> Visible</label>
+      <label class="checkbox-row"><input name="readOnly" type="checkbox" class="checkbox-input" ${config.readOnly?'checked':''}> Read only</label>
+    </div><button class="button button-primary">Save field settings</button></form>`;
+  panel.classList.remove('hidden');
+}
+
 async function renderWorkspace() {
-  const [workspace, members] = await Promise.all([api(workspacePath()), api(`${workspacePath('members')}`)]);
+  const [workspace, members, fields, tags, sources, taskTypes, assignmentRules, scoringRules, layouts] = await Promise.all([
+    api(workspacePath()), api(workspacePath('members')), api(`${workspacePath('custom-fields')}?entityType=lead`), api(workspacePath('tags')),
+    api(workspacePath('lead-sources')), api(workspacePath('task-types')), api(workspacePath('assignment-rules')), api(workspacePath('scoring-rules')), api(`${workspacePath('layouts')}?entityType=lead`)
+  ]);
   const canManage = ['owner','admin'].includes(appState.role);
-  setPage(`${pageHeading('TEAM SETTINGS', 'Workspace', 'Manage the team boundary, access roles and operating defaults.')}
+  appState.customFieldCache = fields.data ?? [];
+  const fieldRows = (fields.data ?? []).map(field => `<tr><td>${escapeHtml(field.label)}</td><td><code>${escapeHtml(field.field_key)}</code></td><td>${badge(field.field_type)}</td><td>${field.required ? 'Required' : 'Optional'}</td><td>${canManage ? `<button class="quiet-button" data-action="edit-custom-field" data-id="${escapeHtml(field.id)}">Edit</button> <button class="quiet-button" data-action="field-required" data-required="${field.required ? 'false' : 'true'}" data-id="${escapeHtml(field.id)}">${field.required ? 'Make optional' : 'Make required'}</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="5" class="empty-state">No custom lead fields configured.</td></tr>';
+  const tagRows = (tags.data ?? []).map(tag => `<span class="badge">${escapeHtml(tag.name)}</span>`).join(' ') || '<span class="muted">No tags configured.</span>';
+  setPage(`${pageHeading('CRM BUILDER', 'Workspace', 'Configure the team boundary, CRM fields, tags and operating defaults without rebuilding the application.')}
     <section class="panel"><div class="panel-header"><h2 class="panel-title">Workspace profile</h2><span class="badge">${escapeHtml(appState.role)}</span></div><div class="panel-body"><dl class="key-value"><dt>Name</dt><dd>${escapeHtml(workspace.name)}</dd><dt>Workspace slug</dt><dd>${escapeHtml(workspace.slug)}</dd><dt>Timezone</dt><dd>${escapeHtml(workspace.timezone)}</dd><dt>Currency</dt><dd>${escapeHtml(workspace.currency)}</dd></dl></div></section>
     ${canManage ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Update workspace</h2></div><form id="workspaceForm" class="panel-body"><div class="inline-form"><label>Workspace name<input name="name" value="${escapeHtml(workspace.name)}" required maxlength="120"></label><label>Timezone<input name="timezone" value="${escapeHtml(workspace.timezone)}" required maxlength="80"></label><label>Currency<input name="currency" value="${escapeHtml(workspace.currency)}" minlength="3" maxlength="3" required></label><button class="button button-primary">Save settings</button></div></form></section>` : ''}
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Lead fields</h2><p class="panel-subtitle">Workspace-scoped custom field definitions</p></div></div><div class="table-wrap"><table><thead><tr><th>Label</th><th>Key</th><th>Type</th><th>Requirement</th><th></th></tr></thead><tbody>${fieldRows}</tbody></table></div>
+      ${canManage ? `<form id="customFieldForm" class="panel-body"><div class="inline-form"><label>Label<input name="label" required maxlength="160"></label><label>Key<input name="fieldKey" required maxlength="80" pattern="[A-Za-z0-9_]+"></label><label>Type<select name="fieldType"><option>text</option><option>textarea</option><option>number</option><option>currency</option><option>date</option><option>datetime</option><option>boolean</option><option>select</option><option>multiselect</option><option>email</option><option>phone</option><option>url</option></select></label><label>Section<input name="section" value="Details" maxlength="120"></label><label>Order<input name="order" type="number" min="0" value="0"></label><label>Options (comma-separated)<input name="options" maxlength="1000"></label><label class="checkbox-row"><input name="required" type="checkbox" class="checkbox-input"> Required</label><label class="checkbox-row"><input name="readOnly" type="checkbox" class="checkbox-input"> Read only</label><button class="button button-primary">Add field</button></div></form>` : ''}</section>
+    <section id="customFieldEditPanel" class="panel hidden"></section>
+    <section class="panel"><div class="panel-header"><h2 class="panel-title">Tags</h2></div><div class="panel-body"><div class="heading-actions">${tagRows}</div>${canManage ? `<form id="tagForm" class="inline-form"><label>New tag<input name="name" required maxlength="80"></label><button class="button button-primary">Add tag</button></form>` : ''}</div></section>
+    <section class="panel"><div class="panel-header"><h2 class="panel-title">Lead sources & task types</h2></div><div class="panel-body"><div class="heading-actions">${(sources.data??[]).map(item=>badge(item.name)).join(' ')||'<span class="muted">No lead sources.</span>'}</div><div class="heading-actions">${(taskTypes.data??[]).map(item=>badge(item.name)).join(' ')||'<span class="muted">No custom task types.</span>'}</div>${canManage?`<div class="field-grid"><form id="leadSourceForm" class="inline-form"><label>Lead source<input name="name" required maxlength="120"></label><button class="button button-secondary">Add source</button></form><form id="taskTypeForm" class="inline-form"><label>Task type<input name="name" required maxlength="120"></label><button class="button button-secondary">Add task type</button></form></div>`:''}</div></section>
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Assignment rules</h2><p class="panel-subtitle">First matching active rule assigns new unowned leads.</p></div></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>Strategy</th><th>Priority</th><th>Status</th><th></th></tr></thead><tbody>${(assignmentRules.data??[]).map(rule=>`<tr><td>${escapeHtml(rule.name)}</td><td>${badge(rule.strategy)}</td><td>${escapeHtml(rule.priority)}</td><td>${badge(rule.active?'active':'inactive')}</td><td>${canManage?`<button class="quiet-button" data-action="toggle-assignment-rule" data-id="${escapeHtml(rule.id)}" data-active="${rule.active?'false':'true'}">${rule.active?'Disable':'Enable'}</button>`:'—'}</td></tr>`).join('')||'<tr><td colspan="5" class="empty-state">No assignment rules.</td></tr>'}</tbody></table></div>${canManage?`<form id="assignmentRuleForm" class="panel-body"><div class="field-grid"><label>Name<input name="name" required maxlength="160"></label><label>Priority<input name="priority" type="number" value="100" min="0"></label><label>Strategy<select name="strategy"><option value="round_robin">Round robin</option><option value="fixed_owner">Fixed owner</option><option value="unassigned">Leave unassigned</option></select></label><label>Fixed owner<select name="userId"><option value="">—</option>${(members.data??[]).filter(m=>m.active).map(m=>`<option value="${escapeHtml(m.id||m.user_id)}">${escapeHtml(m.display_name)}</option>`).join('')}</select></label><label class="span-2">Conditions JSON<textarea name="conditions" placeholder='{"all":[{"field":"location","operator":"contains","value":"Goa"}]}'></textarea></label></div><button class="button button-primary">Add assignment rule</button></form>`:''}</section>
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Lead scoring rules</h2><p class="panel-subtitle">Matching rules combine into a deterministic lead score.</p></div></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>Score</th><th>Priority</th><th>Status</th><th></th></tr></thead><tbody>${(scoringRules.data??[]).map(rule=>`<tr><td>${escapeHtml(rule.name)}</td><td>${escapeHtml(rule.score_delta)}</td><td>${escapeHtml(rule.priority)}</td><td>${badge(rule.active?'active':'inactive')}</td><td>${canManage?`<button class="quiet-button" data-action="toggle-scoring-rule" data-id="${escapeHtml(rule.id)}" data-active="${rule.active?'false':'true'}">${rule.active?'Disable':'Enable'}</button>`:'—'}</td></tr>`).join('')||'<tr><td colspan="5" class="empty-state">No scoring rules.</td></tr>'}</tbody></table></div>${canManage?`<form id="scoringRuleForm" class="panel-body"><div class="field-grid"><label>Name<input name="name" required maxlength="160"></label><label>Score delta<input name="scoreDelta" type="number" required value="10"></label><label>Priority<input name="priority" type="number" value="100" min="0"></label><label class="span-2">Conditions JSON<textarea name="conditions" required placeholder='{"all":[{"field":"budget","operator":">=","value":10000000}]}'></textarea></label></div><button class="button button-primary">Add scoring rule</button></form>`:''}</section>
+    <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Lead list layouts</h2><p class="panel-subtitle">Choose which standard columns appear in the lead directory.</p></div></div><div class="panel-body"><div class="heading-actions">${(layouts.data??[]).map(layout=>badge(layout.name)).join(' ')||'<span class="muted">Default layout is active.</span>'}${canManage?`<form id="layoutForm"><div class="inline-form"><label>Name<input name="name" value="Sales layout" required maxlength="160"></label>${['project','status','budget','nextAction','owner','score','location'].map(column=>`<label class="checkbox-row"><input type="checkbox" name="layoutColumn" value="${column}" ${['project','status','budget','nextAction'].includes(column)?'checked':''}> ${column}</label>`).join('')}<button class="button button-secondary">Save layout</button></div></form>`:''}</div></div></section>
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Members</h2><p class="panel-subtitle">${fmtNumber(members.data?.length ?? 0)} active and invited users</p></div></div><div class="table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead><tbody>${(members.data ?? []).map(member => `<tr><td>${escapeHtml(member.display_name)}</td><td>${escapeHtml(member.email)}</td><td>${badge(member.role)}</td><td>${badge(member.active ? 'active' : 'inactive')}</td></tr>`).join('')}</tbody></table></div></section>
     ${canManage ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Add a team member</h2></div><form id="memberForm" class="panel-body"><div class="field-grid"><label>Name<input name="displayName" required maxlength="120"></label><label>Email<input name="email" type="email" required maxlength="320"></label><label>Initial password<input name="initialPassword" type="password" required minlength="12" maxlength="1024"></label><label>Role<select name="role"><option>agent</option><option>manager</option><option>reporting</option><option>admin</option><option>service</option></select></label></div><p class="muted small">Share the initial password with the member through your normal secure process. Email delivery is not enabled.</p><button class="button button-primary">Create member</button></form></section>` : ''}`);
 }
 
 async function renderView(view) {
+  if (!viewAllowed(view, appState.role)) view = 'dashboard';
   appState.view = view;
   document.querySelectorAll('.nav-item').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   try {
     if (view === 'dashboard') await renderDashboard();
     else if (view === 'leads') await renderLeads();
+    else if (view === 'trash') await renderTrash();
     else if (view === 'pipelines') await renderPipelines();
     else if (view === 'tasks') await renderTasks();
+    else if (view === 'meetings') await renderMeetings();
     else if (view === 'communications') await renderCommunications();
     else if (view === 'calling') await renderCalling();
     else if (view === 'automations') await renderAutomations();
@@ -342,13 +549,61 @@ $('#viewRoot').addEventListener('click', async event => {
   if (!button) return;
   const { action, id } = button.dataset;
   try {
+    if (action === 'complete-task') { await api(`${workspacePath(`tasks/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: 'completed' } }); showToast('Task completed.'); await renderView(appState.view); return; }
     if (action === 'toggle-new-lead') $('#newLeadPanel').classList.toggle('hidden');
+    else if (action === 'toggle-import-leads') $('#leadImportPanel')?.classList.toggle('hidden');
+    else if (action === 'preview-csv-import') {
+      const file = $('#csvImportFile')?.files?.[0]; if (!file) throw new Error('Choose a CSV file.');
+      const csv = await file.text();
+      const preview = await api(workspacePath('leads/import/preview'), { method: 'POST', body: { csv } });
+      appState.csvImportText = csv; appState.csvImportFields = preview.fields ?? []; appState.csvImportErrors = [];
+      const headers = preview.headers ?? [];
+      const mappingControls = appState.csvImportFields.map(field => `<label>${escapeHtml(field.label)}${field.required ? ' *' : ''}<select data-csv-map="${escapeHtml(field.key)}"><option value="">Do not import</option>${headers.map(header => `<option value="${escapeHtml(header)}" ${preview.suggestedMapping?.[field.key] === header ? 'selected' : ''}>${escapeHtml(header)}</option>`).join('')}</select></label>`).join('');
+      const sampleHeaders = headers.slice(0, 10);
+      const sampleRows = (preview.sampleRows ?? []).map(row => `<tr>${sampleHeaders.map((_, index) => `<td>${escapeHtml(row[index])}</td>`).join('')}</tr>`).join('');
+      $('#csvImportPreview').innerHTML = `<p class="panel-subtitle">${fmtNumber(preview.rowCount)} data rows found. Map each CRM field to a file column; fields with * must be mapped.</p><div class="field-grid">${mappingControls}</div><h3 class="panel-title">First ${Math.min(5, preview.sampleRows?.length ?? 0)} rows${headers.length > 10 ? ` · showing 10 of ${headers.length} columns` : ''}</h3><div class="table-wrap"><table><thead><tr>${sampleHeaders.map(header => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead><tbody>${sampleRows || `<tr><td colspan="${Math.max(1, sampleHeaders.length)}" class="empty-state">No data rows found.</td></tr>`}</tbody></table></div>`;
+      $('#csvImportPreview').classList.remove('hidden');
+      const submit = $('#csvImportSubmit'); submit.textContent = `Import ${fmtNumber(preview.rowCount)} rows`; submit.disabled = preview.rowCount === 0; submit.classList.remove('hidden');
+      $('#csvImportResult').replaceChildren();
+    }
+    else if (action === 'download-import-errors') downloadCsv('redblack-import-errors.csv', ['CSV row','Error'], appState.csvImportErrors.map(item => [item.row, item.message]));
+    else if (action === 'toggle-lead-edit') $('#leadEditPanel')?.classList.toggle('hidden');
     else if (action === 'new-lead') { renderView('leads'); setTimeout(() => $('#newLeadPanel')?.classList.remove('hidden'), 0); }
     else if (action === 'lead-details') await renderLeadDetail(id);
+    else if (action === 'restore-lead') { await api(`${workspacePath(`leads/${encodeURIComponent(id)}/restore`)}`, { method: 'POST', body: {} }); showToast('Lead restored.'); await renderTrash(); }
+    else if (action === 'purge-lead') { if (!confirm('Permanently delete this trashed lead and its dependent CRM records? This cannot be undone.')) return; await api(`${workspacePath(`leads/${encodeURIComponent(id)}/permanent`)}`, { method: 'DELETE', body: {} }); showToast('Lead permanently deleted.'); await renderTrash(); }
+    else if (action === 'select-lead') { if (button.checked) appState.selectedLeads.add(id); else appState.selectedLeads.delete(id); await renderLeads(); }
+    else if (action === 'select-all-leads') { document.querySelectorAll('[data-action="select-lead"]').forEach(input => { input.checked = button.checked; if (button.checked) appState.selectedLeads.add(input.dataset.id); else appState.selectedLeads.delete(input.dataset.id); }); await renderLeads(); }
+    else if (action === 'bulk-trash') { if (!confirm('Move selected leads to Trash?')) return; await api(workspacePath('leads/bulk'), { method: 'POST', body: { leadIds: [...appState.selectedLeads], operation: 'trash' } }); appState.selectedLeads.clear(); showToast('Selected leads moved to Trash.'); await renderLeads(); }
     else if (action === 'next-leads') { appState.cursor = button.dataset.cursor; await renderLeads(); }
-    else if (action === 'clear-lead-filters') { appState.cursor = null; appState.leadSearch = ''; appState.leadStatus = ''; await renderLeads(); }
+    else if (action === 'next-trash') { appState.trashCursor = button.dataset.cursor; await renderTrash(); }
+    else if (action === 'clear-lead-filters') { appState.cursor = null; appState.leadSearch = ''; appState.leadStatus = ''; appState.selectedLeads.clear(); await renderLeads(); }
     else if (action === 'toggle-task-form') $('#taskFormPanel').classList.toggle('hidden');
+    else if (action === 'edit-task') openTaskEditor(id);
+    else if (action === 'close-task-edit') $('#taskEditPanel')?.classList.add('hidden');
+    else if (action === 'task-status') { await api(`${workspacePath(`tasks/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: button.dataset.status } }); showToast('Task status updated.'); await renderTasks(); }
+    else if (action === 'meeting-status') { await api(`${workspacePath(`meetings/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { status: button.dataset.status } }); showToast('Meeting updated.'); await renderMeetings(); }
+    else if (action === 'edit-meeting') openMeetingEditor(id);
+    else if (action === 'close-meeting-edit') $('#meetingEditPanel')?.classList.add('hidden');
+    else if (action === 'edit-custom-field') openCustomFieldEditor(id);
+    else if (action === 'close-custom-field-edit') $('#customFieldEditPanel')?.classList.add('hidden');
+    else if (action === 'field-required') { await api(`${workspacePath(`custom-fields/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { required: button.dataset.required === 'true' } }); showToast('Field settings updated.'); await renderWorkspace(); }
+    else if (action === 'toggle-assignment-rule') { await api(`${workspacePath(`assignment-rules/${encodeURIComponent(id)}`)}`, { method:'PATCH', body:{ active:button.dataset.active==='true' } }); showToast('Assignment rule updated.'); await renderWorkspace(); }
+    else if (action === 'toggle-scoring-rule') { await api(`${workspacePath(`scoring-rules/${encodeURIComponent(id)}`)}`, { method:'PATCH', body:{ active:button.dataset.active==='true' } }); showToast('Scoring rule updated.'); await renderWorkspace(); }
     else if (action === 'toggle-automation-form') $('#automationFormPanel').classList.toggle('hidden');
+    else if (action === 'edit-automation') await loadAutomationEditor(id, false);
+    else if (action === 'clone-automation') await loadAutomationEditor(id, true);
+    else if (action === 'test-automation') { const leadId=prompt('Lead ID for this test run (optional):')||null; await api(`${workspacePath(`automations/${encodeURIComponent(id)}/test`)}`,{method:'POST',headers:{'Idempotency-Key':`test-${crypto.randomUUID()}`},body:{leadId}});showToast('Automation test queued.'); }
+    else if (action === 'add-automation-step') { appState.automationSteps ??= []; appState.automationSteps.push({ type: button.dataset.type, config: automationDefaultConfig(button.dataset.type) }); renderAutomationSteps(); }
+    else if (action === 'remove-automation-step') { appState.automationSteps.splice(Number(button.dataset.index), 1); renderAutomationSteps(); }
+    else if (action === 'automation-runs') { const runs = await api(`${workspacePath(`automations/${encodeURIComponent(id)}/runs`)}?limit=50`); const panel=$('#automationRunPanel'); panel.innerHTML=`<div class="panel-header"><h2 class="panel-title">Run history</h2></div><div class="table-wrap"><table><thead><tr><th>Status</th><th>Attempts</th><th>Started</th><th>Completed</th><th>Error</th><th></th></tr></thead><tbody>${(runs.data??[]).map(run=>`<tr><td>${badge(run.status)}</td><td>${escapeHtml(run.attempt_count)}</td><td>${fmtDate(run.started_at,{time:true})}</td><td>${fmtDate(run.completed_at,{time:true})}</td><td>${escapeHtml(run.error_message||'—')}</td><td><button class="quiet-button" data-action="automation-run-detail" data-id="${escapeHtml(id)}" data-run-id="${escapeHtml(run.id)}">Details</button></td></tr>`).join('')||'<tr><td colspan="6" class="empty-state">No runs yet.</td></tr>'}</tbody></table></div>`; panel.classList.remove('hidden'); }
+    else if (action === 'automation-run-detail') {
+      const detail=await api(`${workspacePath(`automations/${encodeURIComponent(id)}/runs/${encodeURIComponent(button.dataset.runId)}`)}`);
+      const actions=detail.run?.definition?.actions??[]; const panel=$('#automationRunPanel');
+      panel.innerHTML=`<div class="panel-header"><div><h2 class="panel-title">Run details</h2><p class="panel-subtitle">Version ${escapeHtml(detail.run?.version_number??'—')} · ${badge(detail.run?.status??'unknown')}</p></div><button class="quiet-button" data-action="automation-runs" data-id="${escapeHtml(id)}">Back to runs</button></div>
+        <div class="table-wrap"><table><thead><tr><th>Step</th><th>Action</th><th>Status</th><th>Result</th><th>Completed</th></tr></thead><tbody>${(detail.steps??[]).map(step=>{const actionDef=actions[step.position]??{};return `<tr><td>${escapeHtml(Number(step.position)+1)}</td><td>${escapeHtml(actionDef.type||actionDef.actionType||'action')}</td><td>${badge(step.status)}</td><td><code>${escapeHtml(JSON.stringify(step.result??{}))}</code></td><td>${fmtDate(step.completed_at,{time:true})}</td></tr>`;}).join('')||'<tr><td colspan="5" class="empty-state">No step records were written for this run.</td></tr>'}</tbody></table></div>`;
+      panel.classList.remove('hidden');
+    }
     else if (action === 'reload-view') await renderView(appState.view);
     else if (action === 'run-automation') {
       const key = `manual-${crypto.randomUUID()}`;
@@ -359,7 +614,35 @@ $('#viewRoot').addEventListener('click', async event => {
 });
 
 $('#viewRoot').addEventListener('change', async event => {
+  if (event.target.id === 'csvImportFile') {
+    appState.csvImportText = null; appState.csvImportFields = []; appState.csvImportErrors = [];
+    $('#csvImportPreview')?.classList.add('hidden'); $('#csvImportPreview')?.replaceChildren();
+    $('#csvImportResult')?.replaceChildren(); $('#csvImportSubmit')?.classList.add('hidden');
+  }
   if (event.target.id === 'leadStatus') { appState.leadStatus = event.target.value; appState.cursor = null; await renderLeads(); }
+  if (event.target.id === 'savedLeadView' && event.target.value) {
+    const option=event.target.selectedOptions[0]; let config={}; try{config=JSON.parse(option.dataset.config||'{}');}catch{}
+    appState.leadSearch=config.q||''; appState.leadStatus=config.status||''; appState.cursor=null; await renderLeads();
+  }
+  if (event.target.id === 'bulkStatus' && event.target.value) {
+    if (!appState.selectedLeads.size) { showToast('Select at least one lead.', 'error'); event.target.value = ''; return; }
+    try {
+      await api(workspacePath('leads/bulk'), { method: 'POST', body: { leadIds: [...appState.selectedLeads], operation: 'status', status: event.target.value } });
+      appState.selectedLeads.clear(); showToast('Selected lead statuses updated.'); await renderLeads();
+    } catch (error) { showToast(error.message, 'error'); }
+  }
+  if (event.target.id === 'bulkStage' && event.target.value) {
+    if (!appState.selectedLeads.size) { showToast('Select at least one lead.','error'); event.target.value=''; return; }
+    const [pipelineId,stageId]=event.target.value.split('|'); try{await api(workspacePath('leads/bulk'),{method:'POST',body:{leadIds:[...appState.selectedLeads],operation:'stage',pipelineId,stageId}});appState.selectedLeads.clear();showToast('Selected leads moved.');await renderLeads();}catch(error){showToast(error.message,'error');}
+  }
+  if (event.target.id === 'bulkTag' && event.target.value) {
+    if (!appState.selectedLeads.size) { showToast('Select at least one lead.','error'); event.target.value=''; return; }
+    try{await api(workspacePath('leads/bulk'),{method:'POST',body:{leadIds:[...appState.selectedLeads],operation:'tags',tagIds:[event.target.value]}});appState.selectedLeads.clear();showToast('Selected leads tagged.');await renderLeads();}catch(error){showToast(error.message,'error');}
+  }
+  if (event.target.id === 'bulkOwner' && event.target.value) {
+    if (!appState.selectedLeads.size) { showToast('Select at least one lead.','error'); event.target.value=''; return; }
+    try{await api(workspacePath('leads/bulk'),{method:'POST',body:{leadIds:[...appState.selectedLeads],operation:'owner',ownerId:event.target.value}});appState.selectedLeads.clear();showToast('Selected leads assigned.');await renderLeads();}catch(error){showToast(error.message,'error');}
+  }
   if (event.target.id === 'pipelineChoice') return;
   if (event.target.matches('[data-action="move-stage"]') && event.target.value) {
     const select = event.target; const stageId = select.value;
@@ -368,9 +651,12 @@ $('#viewRoot').addEventListener('change', async event => {
       showToast('Lead moved to the new stage.'); await renderPipelines();
     } catch (error) { showToast(error.message, 'error'); }
   }
-  if (event.target.matches('[data-action="complete-task"]') && event.target.checked) {
-    try { await api(`${workspacePath(`tasks/${encodeURIComponent(event.target.dataset.id)}`)}`, { method: 'PATCH', body: { status: 'completed' } }); showToast('Task completed.'); await renderView(appState.view); }
-    catch (error) { event.target.checked = false; showToast(error.message, 'error'); }
+  if (event.target.matches('[data-action="complete-task"]')) {
+    const checkbox = event.target.matches('input[type="checkbox"]');
+    if (!checkbox || event.target.checked) {
+      try { await api(`${workspacePath(`tasks/${encodeURIComponent(event.target.dataset.id)}`)}`, { method: 'PATCH', body: { status: 'completed' } }); showToast('Task completed.'); await renderView(appState.view); }
+      catch (error) { if (checkbox) event.target.checked = false; showToast(error.message, 'error'); }
+    }
   }
 });
 
@@ -384,13 +670,65 @@ $('#viewRoot').addEventListener('input', event => {
 $('#viewRoot').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.target; const input = formObject(form);
   try {
-    if (form.id === 'newLeadForm') {
-      const lead = { ...input, budget: input.budget ? Number(input.budget) : null, nextActionAt: input.nextActionAt ? localDateTime(input.nextActionAt) : null };
-      Object.keys(lead).forEach(key => { if (lead[key] === '') lead[key] = null; });
-      await api(workspacePath('leads'), { method: 'POST', body: lead }); showToast('Lead created.'); appState.cursor = null; await renderLeads();
+    if (form.matches('[data-stage-edit-form]')) {
+      await api(`${workspacePath(`pipelines/${encodeURIComponent(form.dataset.pipelineId)}/stages/${encodeURIComponent(form.dataset.stageId)}`)}`, { method:'PATCH', body:{ name:input.name, slug:input.slug, position:Number(input.position), isWon:form.elements.isWon.checked, isLost:form.elements.isLost.checked } });
+      showToast('Pipeline stage updated.'); await renderPipelines(form.dataset.pipelineId);
+    } else if (form.id === 'pipelineEditForm') {
+      await api(`${workspacePath(`pipelines/${encodeURIComponent(form.dataset.pipelineId)}`)}`, { method:'PATCH', body:{ name:input.name, slug:input.slug, active:form.elements.active.checked } });
+      showToast('Pipeline settings saved.'); await renderPipelines(form.dataset.pipelineId);
+    } else if (form.id === 'leadEditForm') {
+      const leadId = form.dataset.leadId; const customFields = {};
+      form.querySelectorAll('[name^="cf:"]').forEach(control => {
+        const fieldId = control.name.slice(3);
+        if (control.type === 'checkbox') customFields[fieldId] = control.checked;
+        else if (control.multiple) customFields[fieldId] = [...control.selectedOptions].map(option => option.value);
+        else customFields[fieldId] = control.value || null;
+      });
+      const tagIds = [...form.querySelectorAll('[data-lead-tag]:checked')].map(control => control.value);
+      const payload = { ...input, score: input.score ? Number(input.score) : 0, budget: input.budget ? Number(input.budget) : null, nextActionAt: input.nextActionAt ? localDateTime(input.nextActionAt) : null, temperature: input.temperature || null, customFields, tagIds };
+      Object.keys(payload).filter(key => key.startsWith('cf:')).forEach(key => delete payload[key]);
+      await api(`${workspacePath(`leads/${encodeURIComponent(leadId)}`)}`, { method: 'PATCH', body: payload }); showToast('Lead updated.'); await renderLeadDetail(leadId);
+    } else if (form.id === 'newLeadForm') {
+      const customFields = {}; form.querySelectorAll('[name^="cf:"]').forEach(control => { const fieldId=control.name.slice(3); customFields[fieldId]=control.type==='checkbox'?control.checked:(control.multiple?[...control.selectedOptions].map(o=>o.value):(control.value||null)); });
+      const tagIds=[...form.querySelectorAll('[data-new-lead-tag]:checked')].map(control=>control.value);
+      const lead = { ...input, budget: input.budget ? Number(input.budget) : null, nextActionAt: input.nextActionAt ? localDateTime(input.nextActionAt) : null, temperature: input.temperature || null };
+      Object.keys(lead).filter(key=>key.startsWith('cf:')).forEach(key=>delete lead[key]); Object.keys(lead).forEach(key => { if (lead[key] === '') lead[key] = null; });
+      await api(workspacePath('leads'), { method: 'POST', body: { ...lead, customFields, tagIds } });
+      showToast('Lead created.'); appState.cursor = null; await renderLeads();
+    } else if (form.id === 'savedViewForm') {
+      await api(workspacePath('saved-views'), { method:'POST', body:{ entityType:'lead', name:input.name, config:{ q:appState.leadSearch||'', status:appState.leadStatus||'' } } });
+      showToast('Lead view saved.'); await renderLeads();
+    } else if (form.id === 'csvImportForm') {
+      if (!appState.csvImportText) throw new Error('Preview the selected CSV file before importing.');
+      const mapping = Object.fromEntries([...form.querySelectorAll('[data-csv-map]')].map(select => [select.dataset.csvMap, select.value]).filter(([, header]) => header));
+      if (!['firstName','email','phone'].some(key => mapping[key])) throw new Error('Map First Name, Email or Phone before importing.');
+      const missingRequired = appState.csvImportFields.find(field => field.required && !mapping[field.key]);
+      if (missingRequired) throw new Error(`Map the required custom field “${missingRequired.label.replace(/^Custom: /, '')}” before importing.`);
+      const mappedHeaders = Object.values(mapping);
+      if (new Set(mappedHeaders).size !== mappedHeaders.length) throw new Error('Each CSV column can be mapped to only one CRM field.');
+      const result = await api(workspacePath('leads/import'), { method: 'POST', body: { csv: appState.csvImportText, mapping } });
+      appState.csvImportErrors = result.errors ?? [];
+      const errorRows = appState.csvImportErrors.slice(0, 20).map(item => `<tr><td>${escapeHtml(item.row)}</td><td>${escapeHtml(item.message)}</td></tr>`).join('');
+      const errorDetails = appState.csvImportErrors.length ? `<div class="panel-body"><button class="button button-secondary button-small" type="button" data-action="download-import-errors">Download ${fmtNumber(appState.csvImportErrors.length)} row errors</button><details><summary>Show first ${Math.min(20, appState.csvImportErrors.length)} errors</summary><div class="table-wrap"><table><thead><tr><th>CSV row</th><th>Error</th></tr></thead><tbody>${errorRows}</tbody></table></div></details></div>` : '';
+      $('#csvImportResult').innerHTML = `<div class="notice ${appState.csvImportErrors.length ? 'notice-red' : 'notice-green'}">Processed ${fmtNumber(result.processed)} rows · created ${fmtNumber(result.created)} · skipped duplicates ${fmtNumber(result.skipped)} · errors ${fmtNumber(appState.csvImportErrors.length)}</div>${errorDetails}`;
+      const submit = $('#csvImportSubmit'); submit.disabled = true; submit.textContent = 'Import complete';
+      appState.cursor = null;
     } else if (form.id === 'taskForm') {
       const task = { ...input, leadId: input.leadId || null, dueAt: input.dueAt ? localDateTime(input.dueAt) : null, priority: Number(input.priority ?? 0) };
       await api(workspacePath('tasks'), { method: 'POST', body: task }); showToast('Follow-up created.'); await renderTasks();
+    } else if (form.id === 'pipelineForm') {
+      await api(workspacePath('pipelines'),{method:'POST',body:{name:input.name,slug:input.slug}});showToast('Pipeline created.');await renderPipelines();
+    } else if (form.id === 'stageForm') {
+      await api(`${workspacePath(`pipelines/${encodeURIComponent(input.pipelineId)}/stages`)}`,{method:'POST',body:{name:input.name,slug:input.slug,position:Number(input.position||0),isWon:form.elements.isWon.checked,isLost:form.elements.isLost.checked}});showToast('Stage added.');await renderPipelines();
+    } else if (form.id === 'taskEditForm') {
+      const taskId = form.dataset.taskId;
+      await api(`${workspacePath(`tasks/${encodeURIComponent(taskId)}`)}`, { method: 'PATCH', body: { title: input.title, description: input.description || null, dueAt: input.dueAt ? localDateTime(input.dueAt) : null, priority: Number(input.priority || 0), status: input.status } });
+      showToast('Task updated.'); await renderTasks();
+    } else if (form.id === 'meetingForm') {
+      await api(workspacePath('meetings'), { method: 'POST', body: { leadId: input.leadId || null, meetingType: input.meetingType || null, startsAt: localDateTime(input.startsAt), endsAt: input.endsAt ? localDateTime(input.endsAt) : null, status: 'scheduled', notes: input.notes || null } });
+      showToast('Meeting scheduled.'); await renderMeetings();
+    } else if (form.id === 'meetingEditForm') {
+      const meetingId=form.dataset.meetingId; await api(`${workspacePath(`meetings/${encodeURIComponent(meetingId)}`)}`,{method:'PATCH',body:{meetingType:input.meetingType||null,status:input.status,startsAt:localDateTime(input.startsAt),endsAt:input.endsAt?localDateTime(input.endsAt):null,notes:input.notes||null}}); showToast('Meeting saved.'); await renderMeetings();
     } else if (form.id === 'messageDraftForm') {
       await api(workspacePath('messages'), { method: 'POST', body: input }); showToast('Message draft saved.'); await renderCommunications();
     } else if (form.id === 'callForm') {
@@ -399,10 +737,17 @@ $('#viewRoot').addEventListener('submit', async event => {
       delete call.metadataNotes;
       await api(workspacePath('calls'), { method: 'POST', body: call }); showToast('Call record saved.'); await renderCalling();
     } else if (form.id === 'automationForm') {
-      const actionType = input.actionType;
-      const actionConfig = actionType === 'create_task' ? { title: input.actionText } : actionType === 'create_activity' ? { title: input.actionText } : { channel: 'whatsapp', body: input.actionText };
-      const result = await api(workspacePath('automations'), { method: 'POST', body: { name: input.name, description: input.description || null, triggerType: input.triggerType, triggerConfig: {}, actions: [{ type: actionType, config: actionConfig }], active: form.elements.active.checked } });
-      showToast(`Automation saved as version 1${result.active ? ' and activated' : ''}.`); await renderAutomations();
+      let conditionConfig = {}; if (input.conditions) { try { conditionConfig = JSON.parse(input.conditions); } catch { throw new Error('Trigger conditions must be valid JSON.'); } }
+      const actions = (appState.automationSteps ?? []).map((step, index) => {
+        const control = form.querySelector(`[data-step-config="${index}"]`); let config = step.config;
+        if (control) { try { config = JSON.parse(control.value); } catch { throw new Error(`Step ${index + 1} configuration must be valid JSON.`); } }
+        return { type: step.type, config };
+      });
+      if (!actions.length) throw new Error('Add at least one automation action.');
+      const payload={ name: input.name, description: input.description || null, triggerType: input.triggerType, triggerConfig: conditionConfig, actions, active: form.elements.active.checked };
+      const result = appState.automationEditingId ? await api(`${workspacePath(`automations/${encodeURIComponent(appState.automationEditingId)}`)}`, { method: 'PATCH', body: payload }) : await api(workspacePath('automations'), { method: 'POST', body: payload });
+      appState.automationEditingId=null; appState.automationSteps = [{ type: 'create_task', config: automationDefaultConfig('create_task') }];
+      showToast(`Automation saved${result.active ? ' and activated' : ''}.`); await renderAutomations();
     } else if (form.id === 'estimateForm') {
       const estimate = await api(workspacePath('usage/estimate'), { method: 'POST', body: { ...input, quantity: Number(input.quantity) } });
       $('#estimateResult').innerHTML = `<div class="notice notice-green">Estimated provider cost: <strong>${fmtMoney(estimate.providerCost, estimate.currency)}</strong> · Customer charge: <strong>${fmtMoney(estimate.customerCharge, estimate.currency)}</strong> · Rate ${escapeHtml(estimate.rateId.slice(0, 8))}</div>`;
@@ -411,6 +756,28 @@ $('#viewRoot').addEventListener('submit', async event => {
       await api(workspacePath('usage/rates'), { method: 'POST', body: rate }); showToast('Rate version published.'); await renderUsage();
     } else if (form.id === 'workspaceForm') {
       await api(workspacePath(), { method: 'PATCH', body: input }); showToast('Workspace updated.'); await renderWorkspace();
+    } else if (form.id === 'customFieldEditForm') {
+      const fieldId=form.dataset.fieldId; const existing=(appState.customFieldCache??[]).find(item=>item.id===fieldId); const prior=existing?.config??{};
+      await api(`${workspacePath(`custom-fields/${encodeURIComponent(fieldId)}`)}`, { method:'PATCH', body:{ label:input.label, required:form.elements.required.checked, config:{ ...prior, section:input.section||'Details', order:Number(input.order||0), options:input.options?input.options.split(',').map(v=>v.trim()).filter(Boolean):[], visible:form.elements.visible.checked, readOnly:form.elements.readOnly.checked } } });
+      showToast('Custom field settings saved.'); await renderWorkspace();
+    } else if (form.id === 'customFieldForm') {
+      await api(workspacePath('custom-fields'), { method: 'POST', body: { entityType: 'lead', fieldKey: input.fieldKey, label: input.label, fieldType: input.fieldType, required: form.elements.required.checked, config: { section: input.section || 'Details', order: Number(input.order || 0), options: input.options ? input.options.split(',').map(v => v.trim()).filter(Boolean) : [], visible: true, readOnly: form.elements.readOnly.checked } } });
+      showToast('Custom field added.'); await renderWorkspace();
+    } else if (form.id === 'tagForm') {
+      await api(workspacePath('tags'), { method: 'POST', body: { name: input.name } }); showToast('Tag added.'); await renderWorkspace();
+    } else if (form.id === 'layoutForm') {
+      const columns=[...form.querySelectorAll('[name="layoutColumn"]:checked')].map(control=>control.value); if(!columns.length)throw new Error('Choose at least one lead column.');
+      await api(workspacePath('layouts'),{method:'POST',body:{entityType:'lead',name:input.name,config:{columns},active:true}});showToast('Lead layout saved.');await renderWorkspace();
+    } else if (form.id === 'leadSourceForm') {
+      await api(workspacePath('lead-sources'), { method:'POST', body:{ name:input.name } }); showToast('Lead source added.'); await renderWorkspace();
+    } else if (form.id === 'taskTypeForm') {
+      await api(workspacePath('task-types'), { method:'POST', body:{ name:input.name } }); showToast('Task type added.'); await renderWorkspace();
+    } else if (form.id === 'assignmentRuleForm') {
+      let conditions={}; if(input.conditions){ try{conditions=JSON.parse(input.conditions);}catch{throw new Error('Assignment conditions must be valid JSON.');} }
+      await api(workspacePath('assignment-rules'), { method:'POST', body:{ name:input.name, priority:Number(input.priority||100), strategy:input.strategy, conditions, config:input.userId?{userId:input.userId}:{}, active:true } }); showToast('Assignment rule added.'); await renderWorkspace();
+    } else if (form.id === 'scoringRuleForm') {
+      let conditions={}; try{conditions=JSON.parse(input.conditions||'{}');}catch{throw new Error('Scoring conditions must be valid JSON.');}
+      await api(workspacePath('scoring-rules'), { method:'POST', body:{ name:input.name, priority:Number(input.priority||100), scoreDelta:Number(input.scoreDelta), conditions, active:true } }); showToast('Scoring rule added.'); await renderWorkspace();
     } else if (form.id === 'memberForm') {
       await api(workspacePath('members'), { method: 'POST', body: input }); showToast('Member created.'); await renderWorkspace();
     }

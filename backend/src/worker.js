@@ -60,14 +60,14 @@ async function enqueueStageAutomations(client, run, { pipelineId, fromStageId, s
 async function executeAction(run, action, position) {
   if (!run.lead_id) throw new Error('This action requires a lead-linked automation run.');
   const config = action.config ?? {};
-  await transaction(pool, async client => {
+  return transaction(pool, async client => {
     await client.query(
       `INSERT INTO automation_action_runs(workspace_id, automation_run_id, version_id, position, status)
        VALUES($1,$2,$3,$4,'pending') ON CONFLICT(automation_run_id,position) DO NOTHING`,
       [run.workspace_id, run.id, run.version_id, position]
     );
     const prior = await client.query('SELECT status FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3 FOR UPDATE', [run.workspace_id, run.id, position]);
-    if (prior.rows[0]?.status === 'completed') return;
+    if (prior.rows[0]?.status === 'completed') return { skipped: true };
     await client.query("UPDATE automation_action_runs SET status='pending', result='{}'::jsonb WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3", [run.workspace_id, run.id, position]);
     let result = {};
     if (action.type === 'wait') {
@@ -79,7 +79,8 @@ async function executeAction(run, action, position) {
       const task = await client.query(
         `INSERT INTO tasks(workspace_id, lead_id, assigned_to, created_by, title, description, due_at, status, priority, source, task_type)
          SELECT $1,$2,$3,$4,$5,$6,now()+($7::text || ' minutes')::interval,'pending',0,'automation','follow_up'
-         WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE workspace_id=$1 AND lead_id=$2 AND source='automation' AND title=$5 AND status IN ('pending','in_progress')) RETURNING id`,
+         WHERE NOT EXISTS (SELECT 1 FROM tasks WHERE workspace_id=$1 AND lead_id=$2 AND source='automation' AND title=$5 AND status IN ('pending','in_progress'))
+         ON CONFLICT DO NOTHING RETURNING id`,
         [run.workspace_id, run.lead_id, assignedTo, run.metadata?.requestedBy ?? null, config.title, config.description ?? null, String(config.dueInMinutes ?? 0)]
       );
       result = { taskId: task.rows[0]?.id ?? null, duplicate: !task.rows[0] };
@@ -90,6 +91,70 @@ async function executeAction(run, action, position) {
         [run.workspace_id, run.lead_id, run.metadata?.requestedBy ?? null, config.title, config.body ?? null, JSON.stringify({ automationRunId: run.id, actionPosition: position })]
       );
       result = { activityId: activity.rows[0].id };
+    } else if (action.type === 'create_note') {
+      const note = await client.query(
+        `INSERT INTO activities(workspace_id, lead_id, user_id, type, title, body, metadata)
+         VALUES($1,$2,$3,'note',$4,$5,$6::jsonb) RETURNING id`,
+        [run.workspace_id, run.lead_id, run.metadata?.requestedBy ?? null, config.title, config.body ?? null, JSON.stringify({ automationRunId: run.id, actionPosition: position })]
+      );
+      result = { activityId: note.rows[0].id };
+    } else if (action.type === 'schedule_follow_up') {
+      const task = await client.query(
+        `INSERT INTO tasks(workspace_id, lead_id, assigned_to, created_by, title, due_at, status, priority, source, task_type)
+         SELECT $1,$2,COALESCE(l.owner_user_id,$3),$3,$4,now()+($5::text || ' minutes')::interval,'pending',0,'automation','follow_up'
+           FROM leads l WHERE l.workspace_id=$1 AND l.id=$2 AND l.deleted_at IS NULL
+            AND NOT EXISTS (SELECT 1 FROM tasks WHERE workspace_id=$1 AND lead_id=$2 AND source='automation' AND title=$4 AND status IN ('pending','in_progress'))
+         ON CONFLICT DO NOTHING RETURNING id`,
+        [run.workspace_id, run.lead_id, run.metadata?.requestedBy ?? null, config.title, String(config.dueInMinutes ?? 60)]
+      );
+      result = { taskId: task.rows[0]?.id ?? null, duplicate: !task.rows[0] };
+    } else if (action.type === 'assign_owner') {
+      let ownerId = config.userId ?? null;
+      if (!ownerId) {
+        const candidate = await client.query(`SELECT wm.user_id,COUNT(a.id)::int AS load FROM workspace_members wm
+          LEFT JOIN lead_assignments a ON a.workspace_id=wm.workspace_id AND a.user_id=wm.user_id AND a.unassigned_at IS NULL
+          WHERE wm.workspace_id=$1 AND wm.active=true AND wm.role IN ('agent','manager')
+          GROUP BY wm.user_id ORDER BY load,wm.user_id LIMIT 1`, [run.workspace_id]);
+        ownerId = candidate.rows[0]?.user_id ?? null;
+      }
+      if (!ownerId) {
+        const owner = await client.query("SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND active=true AND role='owner' ORDER BY joined_at LIMIT 1", [run.workspace_id]);
+        ownerId = owner.rows[0]?.user_id ?? null;
+      }
+      if (!ownerId) throw new Error('No active workspace member is available for assignment.');
+      const member = await client.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND active=true', [run.workspace_id, ownerId]);
+      if (!member.rows[0]) throw new Error('Automation owner is not an active workspace member.');
+      const existing = await client.query('SELECT user_id FROM lead_assignments WHERE workspace_id=$1 AND lead_id=$2 AND unassigned_at IS NULL FOR UPDATE', [run.workspace_id, run.lead_id]);
+      if (existing.rows[0]?.user_id !== ownerId) {
+        await client.query('UPDATE lead_assignments SET unassigned_at=now() WHERE workspace_id=$1 AND lead_id=$2 AND unassigned_at IS NULL', [run.workspace_id, run.lead_id]);
+        await client.query('INSERT INTO lead_assignments(workspace_id,lead_id,user_id,assigned_by,reason) VALUES($1,$2,$3,$4,$5)', [run.workspace_id, run.lead_id, ownerId, run.metadata?.requestedBy ?? null, 'Automation assignment']);
+        await client.query('UPDATE leads SET owner_user_id=$3,updated_at=now() WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [run.workspace_id, run.lead_id, ownerId]);
+      }
+      result = { ownerId, unchanged: existing.rows[0]?.user_id === ownerId };
+    } else if (action.type === 'update_lead') {
+      const values = [run.workspace_id, run.lead_id]; const sets = [];
+      if (config.status !== undefined) { values.push(String(config.status).slice(0, 80)); sets.push(`status=$${values.length}`); }
+      if (config.temperature !== undefined) {
+        const temperature = config.temperature === null ? null : String(config.temperature).toLowerCase();
+        if (temperature !== null && !['hot','warm','cold'].includes(temperature)) throw new Error('Automation temperature must be hot, warm or cold.');
+        values.push(temperature); sets.push(`temperature=$${values.length}`);
+      }
+      if (config.score !== undefined) {
+        const score = Number(config.score); if (!Number.isFinite(score) || score < 0) throw new Error('Automation score must be a non-negative number.');
+        values.push(Math.trunc(score)); sets.push(`score=$${values.length}`);
+      }
+      if (config.nextAction !== undefined) { values.push(config.nextAction === null ? null : String(config.nextAction).slice(0, 500)); sets.push(`next_action=$${values.length}`); }
+      if (config.nextActionAt !== undefined) {
+        let nextActionAt = null;
+        if (config.nextActionAt) { const parsed = new Date(config.nextActionAt); if (Number.isNaN(parsed.getTime())) throw new Error('Automation nextActionAt must be a valid date.'); nextActionAt = parsed.toISOString(); }
+        values.push(nextActionAt); sets.push(`next_action_at=$${values.length}`);
+      }
+      if (config.doNotContact !== undefined) { if (typeof config.doNotContact !== 'boolean') throw new Error('Automation doNotContact must be boolean.'); values.push(config.doNotContact); sets.push(`do_not_contact=$${values.length}`); }
+      if (config.notes !== undefined) { values.push(config.notes === null ? null : String(config.notes).slice(0, 10000)); sets.push(`notes=$${values.length}`); }
+      if (!sets.length) throw new Error('Automation update_lead has no supported fields.');
+      const updated = await client.query(`UPDATE leads SET ${sets.join(', ')},updated_at=now() WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL RETURNING id`, values);
+      if (!updated.rows[0]) throw new Error('Lead is missing or archived.');
+      result = { leadId: updated.rows[0].id, fields: sets.map(item => item.split('=')[0]) };
     } else if (action.type === 'change_stage') {
       const stage = await client.query(
         `SELECT p.id AS pipeline_id, s.id AS stage_id, s.name AS stage_name FROM pipelines p JOIN pipeline_stages s ON s.pipeline_id=p.id
@@ -131,6 +196,7 @@ async function executeAction(run, action, position) {
         WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3`,
       [run.workspace_id, run.id, position, JSON.stringify(result)]
     );
+    return { completed: true, wait: action.type === 'wait' };
   });
 }
 
@@ -139,7 +205,8 @@ export async function runOne(run) {
     const actions = run.definition?.actions;
     if (!Array.isArray(actions) || actions.length > 25) throw new Error('Automation version has an invalid action list.');
     for (let index = 0; index < actions.length; index += 1) {
-      try { await executeAction(run, actions[index], index); }
+      let outcome;
+      try { outcome = await executeAction(run, actions[index], index); }
       catch (error) {
         await pool.query(
           `INSERT INTO automation_action_runs(workspace_id, automation_run_id, version_id, position, status, result)
@@ -149,7 +216,7 @@ export async function runOne(run) {
         );
         throw error;
       }
-      if (actions[index].type === 'wait') return;
+      if (actions[index].type === 'wait' && !outcome?.skipped) return;
     }
     await pool.query("UPDATE automation_runs SET status='completed', completed_at=now(), error_message=NULL WHERE id=$1 AND status='running'", [run.id]);
   } catch (error) {
