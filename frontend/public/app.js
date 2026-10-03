@@ -1,5 +1,5 @@
 const $ = selector => document.querySelector(selector);
-const appState = { user: null, workspace: null, workspaces: [], role: null, view: 'dashboard', cursor: null, leadSearch: '', leadStatus: '', selectedLeads: new Set(), '', toastTimer: null };
+const appState = { user: null, workspace: null, workspaces: [], role: null, view: 'dashboard', cursor: null, leadSearch: '', leadStatus: '', selectedLeads: new Set(), toastTimer: null };
 const apiRoot = '/api/v1';
 
 function escapeHtml(value) {
