@@ -116,6 +116,8 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   const secondStageId = (await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'Proposal','proposal',2) RETURNING id", [pipelineId])).rows[0].id;
   const requiredFieldId = (await db.query("INSERT INTO custom_field_definitions(workspace_id,entity_type,field_key,label,field_type,required,config) VALUES($1,'lead','segment','Segment','text',true,'{}'::jsonb) RETURNING id", [workspaceA])).rows[0].id;
   const meetingId = (await db.query("INSERT INTO meetings(workspace_id,lead_id,owner_user_id,starts_at,status,meeting_type) VALUES($1,$2,$3,now(),'scheduled','Test') RETURNING id", [workspaceA, leadA, userId])).rows[0].id;
+  const assignmentRuleId = (await db.query("INSERT INTO crm_assignment_rules(workspace_id,name,conditions,strategy,config,active) VALUES($1,'Test assignment','{}'::jsonb,'unassigned','{}'::jsonb,true) RETURNING id", [workspaceA])).rows[0].id;
+  const scoringRuleId = (await db.query("INSERT INTO crm_scoring_rules(workspace_id,name,conditions,score_delta,active) VALUES($1,'Test score','{}'::jsonb,10,true) RETURNING id", [workspaceA])).rows[0].id;
   const session = await createSession(db, { userId, workspaceId: workspaceA });
   const server = createRedBlackServer({ db });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -134,6 +136,15 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
     assert.equal(meetingsPayload.data.some(item => item.id === meetingId), true);
     const meetingsByLead = await fetch(`http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/meetings?leadId=${leadA}&limit=10`, { headers });
     assert.equal(meetingsByLead.status, 200);
+
+    const assignmentToggle = await fetch(`http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/assignment-rules/${assignmentRuleId}`, { method:'PATCH', headers, body:JSON.stringify({ active:false, priority:50 }) });
+    assert.equal(assignmentToggle.status, 200);
+    const scoringToggle = await fetch(`http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/scoring-rules/${scoringRuleId}`, { method:'PATCH', headers, body:JSON.stringify({ active:false, scoreDelta:25 }) });
+    assert.equal(scoringToggle.status, 200);
+    const ruleStates = await db.query('SELECT active,priority FROM crm_assignment_rules WHERE id=$1', [assignmentRuleId]);
+    assert.deepEqual(ruleStates.rows[0], { active:false, priority:50 });
+    const scoreState = await db.query('SELECT active,score_delta FROM crm_scoring_rules WHERE id=$1', [scoringRuleId]);
+    assert.deepEqual(scoreState.rows[0], { active:false, score_delta:25 });
 
     const createEndpoint = `http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/leads`;
     const missingRequired = await fetch(createEndpoint, { method:'POST', headers, body:JSON.stringify({ firstName:'Missing Required' }) });
