@@ -1,5 +1,5 @@
 const $ = selector => document.querySelector(selector);
-const appState = { user: null, workspace: null, workspaces: [], role: null, view: 'dashboard', cursor: null, leadSearch: '', leadStatus: '', toastTimer: null };
+const appState = { user: null, workspace: null, workspaces: [], role: null, view: 'dashboard', cursor: null, leadSearch: '', leadStatus: '', selectedLeads: new Set(), '', toastTimer: null };
 const apiRoot = '/api/v1';
 
 function escapeHtml(value) {
@@ -103,7 +103,7 @@ async function boot() {
 function renderLeadRows(rows) {
   if (!rows.length) return '<tr><td colspan="6" class="empty-state">No leads found for this view.</td></tr>';
   return rows.map(lead => `<tr>
-    <td><div class="lead-name">${escapeHtml([lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</div><div class="lead-sub">${escapeHtml(lead.company_name || lead.email || lead.phone || '')}</div></td>
+    <td><input type="checkbox" data-action="select-lead" data-id="${escapeHtml(lead.id)}" ${appState.selectedLeads.has(lead.id) ? 'checked' : ''} aria-label="Select lead"><div class="lead-name">${escapeHtml([lead.first_name, lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</div><div class="lead-sub">${escapeHtml(lead.company_name || lead.email || lead.phone || '')}</div></td>
     <td>${escapeHtml(lead.brand_project || lead.opportunity_type || '—')}</td>
     <td>${badge(lead.temperature ?? lead.status)}</td>
     <td>${lead.budget === null ? '—' : fmtMoney(lead.budget)}</td>
@@ -161,7 +161,7 @@ async function renderLeads() {
       <label class="span-2">Requirement<textarea name="requirement" maxlength="5000"></textarea></label>
     </div><div class="heading-actions"><button class="button button-primary" type="submit">Save lead</button><button class="button button-secondary" type="reset">Clear</button></div></form></section>
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Lead directory</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} records on this page</p></div><span class="badge">${escapeHtml(appState.role)}</span></div>
-      <div class="panel-body"><div class="toolbar"><input id="leadSearch" type="search" placeholder="Search name, email, phone or company" value="${escapeHtml(appState.leadSearch)}"><select id="leadStatus"><option value="">All statuses</option>${['New Lead','Contact Attempted','Connected','Qualified','Meeting / Presentation','Proposal','Negotiation','Won','Lost','HOT','WARM','COLD','NO RESPONSE'].map(item => `<option ${appState.leadStatus === item ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('')}</select><button class="button button-secondary button-small" data-action="clear-lead-filters">Clear</button></div>
+      <div class="panel-body"><div class="toolbar"><label><input type="checkbox" data-action="select-all-leads" aria-label="Select all visible leads"> Select all</label><button class="button button-secondary button-small" data-action="bulk-trash" ${appState.selectedLeads.size ? '' : 'disabled'}>Trash selected</button><select id="bulkStatus" aria-label="Bulk status"><option value="">Bulk status…</option><option>New Lead</option><option>Connected</option><option>Qualified</option><option>Won</option><option>Lost</option></select><input id="leadSearch" type="search" placeholder="Search name, email, phone or company" value="${escapeHtml(appState.leadSearch)}"><select id="leadStatus"><option value="">All statuses</option>${['New Lead','Contact Attempted','Connected','Qualified','Meeting / Presentation','Proposal','Negotiation','Won','Lost','HOT','WARM','COLD','NO RESPONSE'].map(item => `<option ${appState.leadStatus === item ? 'selected' : ''}>${escapeHtml(item)}</option>`).join('')}</select><button class="button button-secondary button-small" data-action="clear-lead-filters">Clear</button></div>
       <div class="table-wrap"><table><thead><tr><th>Lead</th><th>Project / opportunity</th><th>Temperature / status</th><th>Budget</th><th>Next action</th><th></th></tr></thead><tbody>${renderLeadRows(result.data ?? [])}</tbody></table></div>
       <div class="pagination"><button class="button button-secondary button-small" data-action="next-leads" ${result.nextCursor ? '' : 'disabled'} data-cursor="${escapeHtml(result.nextCursor ?? '')}">Load more</button></div></div></section>`);
 }
@@ -355,8 +355,8 @@ $('#viewRoot').addEventListener('click', async event => {
     else if (action === 'new-lead') { renderView('leads'); setTimeout(() => $('#newLeadPanel')?.classList.remove('hidden'), 0); }
     else if (action === 'lead-details') await renderLeadDetail(id);
     else if (action === 'restore-lead') { await api(`${workspacePath(`leads/${encodeURIComponent(id)}/restore`)}`, { method: 'POST', body: {} }); showToast('Lead restored.'); await renderTrash(); }
-    else if (action === 'next-leads') { appState.cursor = button.dataset.cursor; await renderLeads(); }
-    else if (action === 'clear-lead-filters') { appState.cursor = null; appState.leadSearch = ''; appState.leadStatus = ''; await renderLeads(); }
+    else if (action === 'select-lead') { if (button.checked) appState.selectedLeads.add(id); else appState.selectedLeads.delete(id); await renderLeads(); }\n    else if (action === 'select-all-leads') { document.querySelectorAll('[data-action="select-lead"]').forEach(input => { input.checked = button.checked; if (button.checked) appState.selectedLeads.add(input.dataset.id); else appState.selectedLeads.delete(input.dataset.id); }); await renderLeads(); }\n    else if (action === 'bulk-trash') { if (!confirm('Move selected leads to Trash?')) return; await api(workspacePath('leads/bulk'), { method: 'POST', body: { leadIds: [...appState.selectedLeads], operation: 'trash' } }); appState.selectedLeads.clear(); showToast('Selected leads moved to Trash.'); await renderLeads(); }\n    else if (action === 'next-leads') { appState.cursor = button.dataset.cursor; await renderLeads(); }
+    else if (action === 'clear-lead-filters') { appState.cursor = null; appState.leadSearch = ''; appState.leadStatus = ''; appState.selectedLeads.clear(); await renderLeads(); }
     else if (action === 'toggle-task-form') $('#taskFormPanel').classList.toggle('hidden');
     else if (action === 'toggle-automation-form') $('#automationFormPanel').classList.toggle('hidden');
     else if (action === 'reload-view') await renderView(appState.view);
