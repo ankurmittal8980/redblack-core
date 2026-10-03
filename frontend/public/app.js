@@ -294,14 +294,14 @@ function bindPipelineDnD() {
 async function renderTasks() {
   const [result, taskTypes] = await Promise.all([api(`${workspacePath('tasks')}?limit=100`), api(workspacePath('task-types'))]);
   appState.taskCache = result.data ?? [];
+  const canWrite = ['owner','admin','manager','agent'].includes(appState.role);
   const rows = appState.taskCache.map(task => {
     const terminal = ['completed','cancelled'].includes(task.status);
-    const actions = terminal
+    const actions = !canWrite ? '—' : (terminal
       ? `<button class="quiet-button" data-action="task-status" data-status="pending" data-id="${escapeHtml(task.id)}">Reopen</button>`
-      : `<button class="quiet-button" data-action="complete-task" data-id="${escapeHtml(task.id)}">Complete</button> <button class="quiet-button" data-action="task-status" data-status="cancelled" data-id="${escapeHtml(task.id)}">Cancel</button>`;
-    return `<tr><td><div class="lead-name">${escapeHtml(task.title)}</div><div class="lead-sub">${escapeHtml(task.task_type || task.source || 'Follow-up')}</div></td><td>${fmtDate(task.due_at, { time: true })}</td><td>${badge(task.status)}</td><td>${escapeHtml(task.priority)}</td><td><button class="quiet-button" data-action="edit-task" data-id="${escapeHtml(task.id)}">Edit</button> ${actions}</td></tr>`;
+      : `<button class="quiet-button" data-action="complete-task" data-id="${escapeHtml(task.id)}">Complete</button> <button class="quiet-button" data-action="task-status" data-status="cancelled" data-id="${escapeHtml(task.id)}">Cancel</button>`);
+    return `<tr><td><div class="lead-name">${escapeHtml(task.title)}</div><div class="lead-sub">${escapeHtml(task.task_type || task.source || 'Follow-up')}</div></td><td>${fmtDate(task.due_at, { time: true })}</td><td>${badge(task.status)}</td><td>${escapeHtml(task.priority)}</td><td>${canWrite ? `<button class="quiet-button" data-action="edit-task" data-id="${escapeHtml(task.id)}">Edit</button>` : ''} ${actions}</td></tr>`;
   }).join('') || '<tr><td colspan="5" class="empty-state">No tasks found.</td></tr>';
-  const canWrite = ['owner','admin','manager','agent'].includes(appState.role);
   setPage(`${pageHeading('FOLLOW-UP WORK', 'Tasks & activities', 'Create, edit, complete, cancel and reopen follow-ups.', canWrite ? '<button class="button button-primary" data-action="toggle-task-form">+ New task</button>' : '')}
     <section id="taskFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Create a follow-up</h2><button class="text-button" data-action="toggle-task-form">Close</button></div><form id="taskForm" class="panel-body"><div class="field-grid"><label>Lead ID (optional)<input name="leadId" maxlength="36"></label><label>Task type<select name="taskType">${['CALL','WHATSAPP','MEETING','EMAIL','OTHER',...(taskTypes.data??[]).map(item=>item.name)].filter((value,index,array)=>array.indexOf(value)===index).map(value=>`<option>${escapeHtml(value)}</option>`).join('')}</select></label><label class="span-2">Title<input name="title" required maxlength="240"></label><label>Due date<input name="dueAt" type="datetime-local"></label><label>Priority<input name="priority" type="number" value="0" min="0" max="10"></label><label class="span-2">Notes<textarea name="description" maxlength="5000"></textarea></label></div><button class="button button-primary">Save task</button></form></section>
     <section id="taskEditPanel" class="panel hidden"></section>
