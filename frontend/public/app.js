@@ -210,6 +210,7 @@ async function renderLeadDetail(leadId) {
 async function renderPipelines() {
   const [pipelines, leads] = await Promise.all([api(workspacePath('pipelines')), api(`${workspacePath('leads')}?limit=100`)]);
   const first = pipelines.data?.[0];
+  const canManage = ['owner','admin'].includes(appState.role);
   const cards = (leads.data ?? []).map(lead => ({ lead, current: null }));
   if (first) {
     const board = first.stages.map(stage => {
@@ -217,7 +218,7 @@ async function renderPipelines() {
       return `<div class="pipeline-column" data-drop-stage="${escapeHtml(stage.id)}" data-drop-pipeline="${escapeHtml(first.id)}"><div class="pipeline-column-header"><span>${escapeHtml(stage.name)}</span><span class="badge">${matching.length}</span></div>${matching.map(({ lead }) => `<article class="pipeline-card" draggable="true" data-drag-lead="${escapeHtml(lead.id)}"><span class="lead-name">${escapeHtml([lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Unnamed lead')}</span><div class="lead-sub">${escapeHtml(lead.brand_project || lead.email || '')}</div><select data-action="move-stage" data-lead="${escapeHtml(lead.id)}" data-pipeline="${escapeHtml(first.id)}"><option value="">Move to stage…</option>${first.stages.map(next => `<option value="${escapeHtml(next.id)}">${escapeHtml(next.name)}</option>`).join('')}</select></article>`).join('') || '<div class="lead-sub">No leads in this stage</div>'}</div>`;
     }).join('');
     setPage(`${pageHeading('OPPORTUNITY FLOW', 'Pipelines', 'Move every opportunity forward with a clear next step.')}
-      <section class="panel"><div class="panel-header"><div><h2 class="panel-title">${escapeHtml(first.name)}</h2><p class="panel-subtitle">Showing up to 100 active leads. Stage changes are recorded in history.</p></div><select id="pipelineChoice">${pipelines.data.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === first.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="panel-body"><div class="pipeline-board">${board}</div></div></section>`);
+      <section class="panel"><div class="panel-header"><div><h2 class="panel-title">${escapeHtml(first.name)}</h2><p class="panel-subtitle">Showing up to 100 active leads. Drag lead cards between stages; movement is recorded in history.</p></div><select id="pipelineChoice">${pipelines.data.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === first.id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></div><div class="panel-body"><div class="pipeline-board">${board}</div></div></section>${canManage ? `<section class="panel"><div class="panel-header"><h2 class="panel-title">Pipeline builder</h2></div><div class="panel-body"><form id="pipelineForm" class="inline-form"><label>Name<input name="name" required maxlength="120"></label><label>Slug<input name="slug" required maxlength="120"></label><button class="button button-secondary">Create pipeline</button></form><form id="stageForm" class="inline-form"><input type="hidden" name="pipelineId" value="${escapeHtml(first.id)}"><label>Stage name<input name="name" required maxlength="120"></label><label>Slug<input name="slug" required maxlength="120"></label><label>Position<input name="position" type="number" min="0" value="${first.stages.length}"></label><label class="checkbox-row"><input name="isWon" type="checkbox"> Won</label><label class="checkbox-row"><input name="isLost" type="checkbox"> Lost</label><button class="button button-secondary">Add stage</button></form></div></section>` : ''}`);
     $('#pipelineChoice').addEventListener('change', () => renderPipelineChoice(pipelines.data, $('#pipelineChoice').value));
     bindPipelineDnD();
   } else setPage(`${pageHeading('OPPORTUNITY FLOW', 'Pipelines', 'No pipelines are available yet.')}<section class="panel"><div class="empty-state">Ask a workspace admin to create a pipeline.</div></section>`);
@@ -600,6 +601,10 @@ $('#viewRoot').addEventListener('submit', async event => {
     } else if (form.id === 'taskForm') {
       const task = { ...input, leadId: input.leadId || null, dueAt: input.dueAt ? localDateTime(input.dueAt) : null, priority: Number(input.priority ?? 0) };
       await api(workspacePath('tasks'), { method: 'POST', body: task }); showToast('Follow-up created.'); await renderTasks();
+    } else if (form.id === 'pipelineForm') {
+      await api(workspacePath('pipelines'),{method:'POST',body:{name:input.name,slug:input.slug}});showToast('Pipeline created.');await renderPipelines();
+    } else if (form.id === 'stageForm') {
+      await api(`${workspacePath(`pipelines/${encodeURIComponent(input.pipelineId)}/stages`)}`,{method:'POST',body:{name:input.name,slug:input.slug,position:Number(input.position||0),isWon:form.elements.isWon.checked,isLost:form.elements.isLost.checked}});showToast('Stage added.');await renderPipelines();
     } else if (form.id === 'taskEditForm') {
       const taskId = form.dataset.taskId;
       await api(`${workspacePath(`tasks/${encodeURIComponent(taskId)}`)}`, { method: 'PATCH', body: { title: input.title, description: input.description || null, dueAt: input.dueAt ? localDateTime(input.dueAt) : null, priority: Number(input.priority || 0), status: input.status } });
