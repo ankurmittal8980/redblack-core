@@ -348,11 +348,20 @@ function renderAutomationSteps() {
   }, { once: true });
 }
 
+async function loadAutomationEditor(automationId, clone = false) {
+  const item=await api(`${workspacePath(`automations/${encodeURIComponent(automationId)}`)}`); const definition=item.definition??{};
+  appState.automationEditingId=clone?null:automationId; appState.automationSteps=(definition.actions??[]).map(step=>({type:step.type,config:step.config??{}}));
+  $('#automationFormPanel')?.classList.remove('hidden'); const form=$('#automationForm'); if(!form)return;
+  form.elements.name.value=clone?`${definition.name||item.name} copy`:(definition.name||item.name||'');
+  form.elements.description.value=definition.description||item.description||''; form.elements.triggerType.value=definition.triggerType||item.trigger_type||'manual';
+  form.elements.conditions.value=JSON.stringify(definition.triggerConfig??item.trigger_config??{},null,2); form.elements.active.checked=clone?false:Boolean(item.active); renderAutomationSteps();
+}
+
 async function renderAutomations() {
   const result = await api(`${workspacePath('automations')}`);
   const canManage = ['owner','admin','manager'].includes(appState.role);
   if (!Array.isArray(appState.automationSteps) || !appState.automationSteps.length) appState.automationSteps = [{ type: 'create_task', config: automationDefaultConfig('create_task') }];
-  const rows = (result.data ?? []).map(item => `<tr><td><div class="lead-name">${escapeHtml(item.name)}</div><div class="lead-sub">v${escapeHtml(item.current_version_id?.slice(0,8) || '—')} · ${escapeHtml(item.description || '')}</div></td><td>${badge(item.trigger_type)}</td><td>${badge(item.active ? 'active' : 'inactive')}</td><td><button class="quiet-button" data-action="run-automation" data-id="${escapeHtml(item.id)}">Queue run</button> <button class="quiet-button" data-action="automation-runs" data-id="${escapeHtml(item.id)}">Run history</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Add a workflow to automate sales work.</td></tr>';
+  const rows = (result.data ?? []).map(item => `<tr><td><div class="lead-name">${escapeHtml(item.name)}</div><div class="lead-sub">v${escapeHtml(item.current_version_id?.slice(0,8) || '—')} · ${escapeHtml(item.description || '')}</div></td><td>${badge(item.trigger_type)}</td><td>${badge(item.active ? 'active' : 'inactive')}</td><td><button class="quiet-button" data-action="edit-automation" data-id="${escapeHtml(item.id)}">Edit</button> <button class="quiet-button" data-action="clone-automation" data-id="${escapeHtml(item.id)}">Clone</button> <button class="quiet-button" data-action="test-automation" data-id="${escapeHtml(item.id)}">Test</button> <button class="quiet-button" data-action="run-automation" data-id="${escapeHtml(item.id)}">Queue run</button> <button class="quiet-button" data-action="automation-runs" data-id="${escapeHtml(item.id)}">Run history</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Add a workflow to automate sales work.</td></tr>';
   setPage(`${pageHeading('WORKFLOW ENGINE', 'Automations', 'Build versioned workflows visually; drag actions to reorder execution.', canManage ? '<button class="button button-primary" data-action="toggle-automation-form">+ New automation</button>' : '')}
     <div class="notice">Published workflow definitions are versioned. Provider-backed actions remain behind consent, configuration and idempotency controls.</div>
     <section id="automationFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Visual automation builder</h2><button class="text-button" data-action="toggle-automation-form">Close</button></div><form id="automationForm" class="panel-body"><div class="field-grid"><label>Name<input name="name" required maxlength="160"></label><label>Trigger<select name="triggerType"><option>manual</option><option>lead.created</option><option>lead.updated</option><option>form.submitted</option><option>lead.stage_changed</option><option>message.incoming</option><option>email.incoming</option><option>appointment.created</option><option>appointment.missed</option><option>task.completed</option><option>meeting.created</option><option>meeting.missed</option><option>call.completed</option><option>call.ended</option><option>lead.no_response</option><option>lead.score_changed</option><option>scheduled.time</option><option>webhook.received</option><option>ai.decision</option></select></label><label class="span-2">Description<input name="description" maxlength="500"></label><label class="span-2">Trigger / condition JSON<textarea name="conditions" placeholder='{"all":[{"field":"score","operator":">=","value":70}]}'></textarea></label></div>
@@ -512,6 +521,9 @@ $('#viewRoot').addEventListener('click', async event => {
     else if (action === 'close-meeting-edit') $('#meetingEditPanel')?.classList.add('hidden');
     else if (action === 'field-required') { await api(`${workspacePath(`custom-fields/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { required: button.dataset.required === 'true' } }); showToast('Field settings updated.'); await renderWorkspace(); }
     else if (action === 'toggle-automation-form') $('#automationFormPanel').classList.toggle('hidden');
+    else if (action === 'edit-automation') await loadAutomationEditor(id, false);
+    else if (action === 'clone-automation') await loadAutomationEditor(id, true);
+    else if (action === 'test-automation') { const leadId=prompt('Lead ID for this test run (optional):')||null; await api(`${workspacePath(`automations/${encodeURIComponent(id)}/test`)}`,{method:'POST',headers:{'Idempotency-Key':`test-${crypto.randomUUID()}`},body:{leadId}});showToast('Automation test queued.'); }
     else if (action === 'add-automation-step') { appState.automationSteps ??= []; appState.automationSteps.push({ type: button.dataset.type, config: automationDefaultConfig(button.dataset.type) }); renderAutomationSteps(); }
     else if (action === 'remove-automation-step') { appState.automationSteps.splice(Number(button.dataset.index), 1); renderAutomationSteps(); }
     else if (action === 'automation-runs') { const runs = await api(`${workspacePath(`automations/${encodeURIComponent(id)}/runs`)}?limit=50`); const panel=$('#automationRunPanel'); panel.innerHTML=`<div class="panel-header"><h2 class="panel-title">Run history</h2></div><div class="table-wrap"><table><thead><tr><th>Status</th><th>Attempts</th><th>Started</th><th>Completed</th><th>Error</th></tr></thead><tbody>${(runs.data??[]).map(run=>`<tr><td>${badge(run.status)}</td><td>${escapeHtml(run.attempt_count)}</td><td>${fmtDate(run.started_at,{time:true})}</td><td>${fmtDate(run.completed_at,{time:true})}</td><td>${escapeHtml(run.error_message||'—')}</td></tr>`).join('')||'<tr><td colspan="5" class="empty-state">No runs yet.</td></tr>'}</tbody></table></div>`; panel.classList.remove('hidden'); }
@@ -635,8 +647,9 @@ $('#viewRoot').addEventListener('submit', async event => {
         return { type: step.type, config };
       });
       if (!actions.length) throw new Error('Add at least one automation action.');
-      const result = await api(workspacePath('automations'), { method: 'POST', body: { name: input.name, description: input.description || null, triggerType: input.triggerType, triggerConfig: conditionConfig, actions, active: form.elements.active.checked } });
-      appState.automationSteps = [{ type: 'create_task', config: automationDefaultConfig('create_task') }];
+      const payload={ name: input.name, description: input.description || null, triggerType: input.triggerType, triggerConfig: conditionConfig, actions, active: form.elements.active.checked };
+      const result = appState.automationEditingId ? await api(`${workspacePath(`automations/${encodeURIComponent(appState.automationEditingId)}`)}`, { method: 'PATCH', body: payload }) : await api(workspacePath('automations'), { method: 'POST', body: payload });
+      appState.automationEditingId=null; appState.automationSteps = [{ type: 'create_task', config: automationDefaultConfig('create_task') }];
       showToast(`Automation saved${result.active ? ' and activated' : ''}.`); await renderAutomations();
     } else if (form.id === 'estimateForm') {
       const estimate = await api(workspacePath('usage/estimate'), { method: 'POST', body: { ...input, quantity: Number(input.quantity) } });
