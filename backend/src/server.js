@@ -185,6 +185,16 @@ async function leadVisible(db, context, leadId) {
   if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_FOUND', 'Lead was not found in this workspace.');
 }
 
+async function trashedLeadVisible(db, context, leadId) {
+  const result = await db.query(
+    `SELECT l.id FROM leads l
+      WHERE l.workspace_id = $1 AND l.id = $2 AND l.deleted_at IS NOT NULL
+        AND ($3 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id = l.workspace_id AND a.lead_id = l.id AND a.user_id = $4 AND a.unassigned_at IS NULL))`,
+    [context.workspaceId, leadId, context.role, context.userId]
+  );
+  if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not available in this workspace trash.');
+}
+
 function cursorFor(requestUrl) {
   if (!requestUrl.searchParams.has('cursor')) return null;
   const cursor = parseCursor(requestUrl.searchParams.get('cursor'));
@@ -459,8 +469,20 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         if (suffix === 'leads/trash' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
-          const result = await db.query(`SELECT l.id, l.first_name, l.last_name, l.company_name, l.email, l.phone, l.status, l.deleted_at, l.updated_at FROM leads l WHERE l.workspace_id=$1 AND l.deleted_at IS NOT NULL AND ($2 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL)) ORDER BY l.deleted_at DESC LIMIT 100`, [workspaceId, current.role, current.userId]);
-          sendJson(response, 200, { data: result.rows }); return;
+          const cursor = cursorFor(url); const limit = pageSize(url);
+          const values = [workspaceId, current.role, current.userId];
+          let cursorFilter = '';
+          if (cursor) { values.push(cursor[0], cursor[1]); cursorFilter = ` AND (l.deleted_at, l.id) < ($${values.length - 1}::timestamptz, $${values.length}::uuid)`; }
+          values.push(limit + 1);
+          const result = await db.query(
+            `SELECT l.id, l.first_name, l.last_name, l.company_name, l.email, l.phone, l.status, l.deleted_at, l.updated_at
+               FROM leads l
+              WHERE l.workspace_id=$1 AND l.deleted_at IS NOT NULL
+                AND ($2 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$3 AND a.unassigned_at IS NULL))
+                ${cursorFilter}
+              ORDER BY l.deleted_at DESC, l.id DESC LIMIT $${values.length}`, values);
+          const hasMore = result.rows.length > limit; const data = result.rows.slice(0, limit);
+          sendJson(response, 200, { data, nextCursor: hasMore && data.length ? makeCursor(data.at(-1).deleted_at, data.at(-1).id) : null }); return;
         }
 
         if (suffix === 'leads/bulk' && request.method === 'POST') {
@@ -539,7 +561,8 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         const leadRoute = suffix.match(/^leads\/([^/]+)(?:\/(.*))?$/);
         if (leadRoute) {
           const leadId = uuid(leadRoute[1], 'leadId'); const action = leadRoute[2] ?? '';
-          await leadVisible(db, context, leadId);
+          if (action === 'restore') await trashedLeadVisible(db, context, leadId);
+          else await leadVisible(db, context, leadId);
           if (request.method === 'GET' && !action) {
             requirePermission(context, 'crm:read');
             const result = await db.query('SELECT * FROM leads WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL', [workspaceId, leadId]);
@@ -715,7 +738,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           requirePermission(context, 'crm:read'); const result = await db.query('SELECT id, entity_type, field_key, label, field_type, required, config, created_at FROM custom_field_definitions WHERE workspace_id=$1 AND entity_type=$2 ORDER BY created_at', [workspaceId, url.searchParams.get('entityType') ?? 'lead']); sendJson(response, 200, { data: result.rows }); return;
         }
         if (suffix === 'custom-fields' && request.method === 'POST') {
-          requirePermission(context, 'workspace:manage'); const input = await body(); const result = await db.query('INSERT INTO custom_field_definitions(workspace_id, entity_type, field_key, label, field_type, required, config) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING *', [workspaceId, enumValue(input.entityType ?? 'lead', 'entityType', ['lead']), requiredString(input.fieldKey, 'fieldKey', { max: 80 }).toLowerCase(), requiredString(input.label, 'label', { max: 160 }), enumValue(input.fieldType ?? 'text', 'fieldType', ['text','number','date','boolean','select','multiselect']), booleanInput(input.required, 'required'), JSON.stringify(input.config ?? {})]); sendJson(response, 201, result.rows[0]); return;
+          requirePermission(context, 'workspace:manage'); const input = await body(); const result = await db.query('INSERT INTO custom_field_definitions(workspace_id, entity_type, field_key, label, field_type, required, config) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING *', [workspaceId, enumValue(input.entityType ?? 'lead', 'entityType', ['lead']), requiredString(input.fieldKey, 'fieldKey', { max: 80 }).toLowerCase(), requiredString(input.label, 'label', { max: 160 }), enumValue(input.fieldType ?? 'text', 'fieldType', ['text','textarea','number','currency','date','datetime','boolean','select','multiselect','email','phone','url']), booleanInput(input.required, 'required'), JSON.stringify(input.config ?? {})]); sendJson(response, 201, result.rows[0]); return;
         }
         const fieldMatch = suffix.match(/^custom-fields\/([^/]+)$/);
         if (fieldMatch && request.method === 'PATCH') {
