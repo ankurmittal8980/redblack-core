@@ -43,7 +43,9 @@ export async function applyMigrations(db = pool) {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+const invokedAsScript = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+
+if (invokedAsScript) {
   try {
     await applyMigrations();
     await closeDatabase();
