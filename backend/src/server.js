@@ -825,8 +825,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
 
         if (suffix === 'meetings' && request.method === 'GET') {
           requirePermission(context, 'crm:read'); const values = [workspaceId]; let filter = 'workspace_id = $1';
-          if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filter += ` AND lead_id = $${values.length}`; }
-          values.push(pageSize(url)); const result = await db.query(`SELECT * FROM meetings WHERE ${filter} ORDER BY starts_at DESC LIMIT $${values.length}`, values);
+          if (context.role === 'agent') { values.push(current.userId); filter += ` AND owner_user_id = ${values.length}`; }
+          if (url.searchParams.get('leadId')) { const leadId = uuid(url.searchParams.get('leadId'), 'leadId'); await leadVisible(db, context, leadId); values.push(leadId); filter += ` AND lead_id = ${values.length}`; }
+          values.push(pageSize(url)); const result = await db.query(`SELECT * FROM meetings WHERE ${filter} ORDER BY starts_at DESC LIMIT ${values.length}`, values);
           sendJson(response, 200, { data: result.rows }); return;
         }
         if (suffix === 'meetings' && request.method === 'POST') {
@@ -848,7 +849,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
         const meetingMatch = suffix.match(/^meetings\/([^/]+)$/);
         if (meetingMatch && request.method === 'PATCH') {
           requirePermission(context, 'crm:write'); const meetingId = uuid(meetingMatch[1], 'meetingId'); const input = await body();
-          const existing = await db.query('SELECT starts_at, ends_at FROM meetings WHERE workspace_id=$1 AND id=$2', [workspaceId, meetingId]);
+          const existing = await db.query(`SELECT starts_at, ends_at FROM meetings WHERE workspace_id=$1 AND id=$2 AND ($3 <> 'agent' OR owner_user_id=$4)`, [workspaceId, meetingId, context.role, current.userId]);
           if (!existing.rows[0]) throw new HttpError(404, 'MEETING_NOT_FOUND', 'Meeting was not found.');
           const candidateStart = input.startsAt !== undefined ? isoDate(input.startsAt, 'startsAt') : existing.rows[0].starts_at;
           const candidateEnd = input.endsAt !== undefined ? (input.endsAt ? isoDate(input.endsAt, 'endsAt') : null) : existing.rows[0].ends_at;
