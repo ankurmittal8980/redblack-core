@@ -197,3 +197,63 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
     await db.end();
   }
 });
+
+
+test('agent CRM APIs stay scoped to assigned records and self task assignment', { skip: !databaseUrl }, async () => {
+  process.env.DATABASE_URL = databaseUrl;
+  process.env.APP_ENV = 'test';
+  const [{ Pool }, { createRedBlackServer }, { createSession }] = await Promise.all([
+    import('pg'), import('../backend/src/server.js'), import('../backend/src/auth.js')
+  ]);
+  const db = new Pool({ connectionString: databaseUrl });
+  const suffix = randomUUID().replaceAll('-', '').slice(0, 12);
+  const workspaceId = (await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', ['Agent Scope', `agent-scope-${suffix}`])).rows[0].id;
+  const agentId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`agent-${suffix}@example.com`, 'Scoped Agent'])).rows[0].id;
+  const peerId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`peer-${suffix}@example.com`, 'Peer Agent'])).rows[0].id;
+  await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'agent'),($1,$3,'agent')", [workspaceId, agentId, peerId]);
+  const ownedLead = (await db.query("INSERT INTO leads(workspace_id,first_name) VALUES($1,'Owned') RETURNING id", [workspaceId])).rows[0].id;
+  const otherLead = (await db.query("INSERT INTO leads(workspace_id,first_name) VALUES($1,'Other') RETURNING id", [workspaceId])).rows[0].id;
+  await db.query("INSERT INTO lead_assignments(workspace_id,lead_id,user_id,assigned_by,reason) VALUES($1,$2,$3,$3,'test'),($1,$4,$5,$5,'test')", [workspaceId, ownedLead, agentId, otherLead, peerId]);
+  const ownedActivity = (await db.query("INSERT INTO activities(workspace_id,lead_id,user_id,type,title) VALUES($1,$2,$3,'note','Owned activity') RETURNING id", [workspaceId, ownedLead, peerId])).rows[0].id;
+  const otherActivity = (await db.query("INSERT INTO activities(workspace_id,lead_id,user_id,type,title) VALUES($1,$2,$3,'note','Other activity') RETURNING id", [workspaceId, otherLead, peerId])).rows[0].id;
+  const ownUnlinkedActivity = (await db.query("INSERT INTO activities(workspace_id,user_id,type,title) VALUES($1,$2,'note','Own unlinked activity') RETURNING id", [workspaceId, agentId])).rows[0].id;
+  const ownedCall = (await db.query("INSERT INTO calls(workspace_id,lead_id,user_id,direction,status) VALUES($1,$2,$3,'outbound','answered') RETURNING id", [workspaceId, ownedLead, peerId])).rows[0].id;
+  const otherCall = (await db.query("INSERT INTO calls(workspace_id,lead_id,user_id,direction,status) VALUES($1,$2,$3,'outbound','answered') RETURNING id", [workspaceId, otherLead, peerId])).rows[0].id;
+  const session = await createSession(db, { userId: agentId, workspaceId });
+  const server = createRedBlackServer({ db });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}/api/v1/workspaces/${workspaceId}`;
+  const headers = {
+    'content-type': 'application/json',
+    cookie: `rb_session=${encodeURIComponent(session.token)}; rb_csrf=${encodeURIComponent(session.csrf)}`,
+    'x-csrf-token': session.csrf
+  };
+  try {
+    const activitiesResponse = await fetch(`${base}/activities?limit=100`, { headers });
+    assert.equal(activitiesResponse.status, 200);
+    const activities = (await activitiesResponse.json()).data.map(item => item.id);
+    assert.equal(activities.includes(ownedActivity), true);
+    assert.equal(activities.includes(ownUnlinkedActivity), true);
+    assert.equal(activities.includes(otherActivity), false);
+
+    const callsResponse = await fetch(`${base}/calls?limit=100`, { headers });
+    assert.equal(callsResponse.status, 200);
+    const calls = (await callsResponse.json()).data.map(item => item.id);
+    assert.equal(calls.includes(ownedCall), true);
+    assert.equal(calls.includes(otherCall), false);
+
+    const crossAssigneeTask = await fetch(`${base}/tasks`, {
+      method: 'POST', headers, body: JSON.stringify({ leadId: ownedLead, assignedTo: peerId, title: 'Should be rejected' })
+    });
+    assert.equal(crossAssigneeTask.status, 403);
+
+    const foreignCallNote = await fetch(`${base}/calls/${otherCall}/notes`, {
+      method: 'POST', headers, body: JSON.stringify({ note: 'Should be rejected' })
+    });
+    assert.equal(foreignCallNote.status, 404);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    await db.end();
+  }
+});
