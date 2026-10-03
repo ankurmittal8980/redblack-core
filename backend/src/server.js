@@ -16,6 +16,7 @@ import { ValidationError, decimal, objectBody, requiredString, optionalString, u
 import { communications, calling } from './providers.js';
 import { AIGateway } from './ai-gateway.js';
 import { OPENAPI_SPEC } from './openapi.js';
+import { parseCsv } from './csv.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const staticRoot = path.resolve(here, '../../frontend/public');
@@ -38,6 +39,17 @@ class HttpError extends Error {
 function sendJson(response, status, value, headers = {}) {
   const body = JSON.stringify(value);
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body), ...headers });
+  response.end(body);
+}
+
+function csvCell(value) {
+  const text = value == null ? '' : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function sendCsv(response, filename, headers, rows) {
+  const body = [headers.map(csvCell).join(','), ...rows.map(row => row.map(csvCell).join(','))].join('\r\n') + '\r\n';
+  response.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${filename}"`, 'Content-Length': Buffer.byteLength(body), 'Cache-Control': 'no-store' });
   response.end(body);
 }
 
@@ -496,6 +508,40 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           await audit(db, { workspaceId, actorUserId: current.userId, action: `leads.bulk_${operation}`, entityType: 'lead', entityId: null, request, metadata: { count: result.rows.length } });
           sendJson(response, 200, { updated: result.rows.map(row => row.id), operation }); return;
         }
+        if (suffix === 'leads/export' && request.method === 'GET') {
+          requirePermission(context, 'crm:read');
+          const values = [workspaceId]; let scope = 'l.workspace_id=$1 AND l.deleted_at IS NULL';
+          if (context.role === 'agent') { values.push(current.userId); scope += ` AND EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=${values.length} AND a.unassigned_at IS NULL)`; }
+          const result = await db.query(`SELECT l.first_name,l.last_name,l.email,l.phone,l.company_name,l.brand_project,l.opportunity_type,l.budget,l.location,l.status,l.temperature,l.score,l.next_action,l.next_action_at,l.created_at FROM leads l WHERE ${scope} ORDER BY l.created_at DESC LIMIT 10000`, values);
+          sendCsv(response, 'redblack-leads.csv', ['First Name','Last Name','Email','Phone','Company','Project','Opportunity Type','Budget','Location','Status','Temperature','Score','Next Action','Next Follow-up','Created'], result.rows.map(row => [row.first_name,row.last_name,row.email,row.phone,row.company_name,row.brand_project,row.opportunity_type,row.budget,row.location,row.status,row.temperature,row.score,row.next_action,row.next_action_at,row.created_at])); return;
+        }
+
+        if (suffix === 'leads/import' && request.method === 'POST') {
+          requirePermission(context, 'crm:write'); const input = await body();
+          const parsed = parseCsv(requiredString(input.csv, 'csv', { max: 900000 }));
+          if (parsed.records.length > 5000) throw new ValidationError('A single import is limited to 5,000 rows.');
+          const key = name => parsed.headers.find(header => header.trim().toLowerCase() === name.toLowerCase());
+          const keys = { first:key('First Name'), last:key('Last Name'), email:key('Email'), phone:key('Phone'), company:key('Company'), project:key('Project'), opportunity:key('Opportunity Type'), budget:key('Budget'), location:key('Location'), status:key('Status') };
+          if (!keys.first && !keys.email && !keys.phone) throw new ValidationError('CSV must contain First Name, Email or Phone columns.');
+          const summary = { created: 0, skipped: 0, errors: [] };
+          for (let index=0; index<parsed.records.length; index += 1) {
+            const row = parsed.records[index].values; const email = normalizeEmail(keys.email ? row[keys.email] : null); const phone = normalizePhone(keys.phone ? row[keys.phone] : null);
+            try {
+              if (email || phone) {
+                const duplicate = await db.query('SELECT id FROM leads WHERE workspace_id=$1 AND deleted_at IS NULL AND (($2::text IS NOT NULL AND email_normalized=$2) OR ($3::text IS NOT NULL AND phone_normalized=$3)) LIMIT 1', [workspaceId,email,phone]);
+                if (duplicate.rows[0]) { summary.skipped += 1; continue; }
+              }
+              const budgetRaw = keys.budget ? row[keys.budget] : null; const budget = budgetRaw ? finiteNumber(Number(String(budgetRaw).replaceAll(',','')), 'budget', { min: 0 }) : null;
+              const inserted = await db.query(`INSERT INTO leads(workspace_id,first_name,last_name,email,email_normalized,phone,phone_normalized,company_name,brand_project,opportunity_type,budget,location,status)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`, [workspaceId, keys.first ? optionalString(row[keys.first], 'firstName',120) : null, keys.last ? optionalString(row[keys.last], 'lastName',120) : null, keys.email ? optionalString(row[keys.email], 'email',320) : null, email, keys.phone ? optionalString(row[keys.phone], 'phone',80) : null, phone, keys.company ? optionalString(row[keys.company], 'company',240) : null, keys.project ? optionalString(row[keys.project], 'project',240) : null, keys.opportunity ? optionalString(row[keys.opportunity], 'opportunityType',160) : null, budget, keys.location ? optionalString(row[keys.location], 'location',240) : null, keys.status ? optionalString(row[keys.status], 'status',80) || 'New Lead' : 'New Lead']);
+              await dispatchAutomationEvent(db, { workspaceId, eventType:'lead.created', leadId:inserted.rows[0].id, eventId:`csv-import:${inserted.rows[0].id}`, actorUserId:current.userId });
+              summary.created += 1;
+            } catch (error) { summary.errors.push({ row: index + 2, message: error.message }); if (summary.errors.length >= 100) break; }
+          }
+          await audit(db, { workspaceId, actorUserId: current.userId, action:'leads.imported', entityType:'lead', entityId:null, request, metadata:summary });
+          sendJson(response, 200, summary); return;
+        }
+
         if (suffix === 'leads' && request.method === 'GET') {
           requirePermission(context, 'crm:read');
           const cursor = cursorFor(url); const limit = pageSize(url); const values = [workspaceId]; const filters = ['l.workspace_id = $1', 'l.deleted_at IS NULL'];
