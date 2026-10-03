@@ -328,7 +328,7 @@ async function renderCalling() {
     <section class="panel"><div class="panel-header"><h2 class="panel-title">Call history</h2></div><div class="table-wrap"><table><thead><tr><th>Direction</th><th>Provider</th><th>Status</th><th>Started</th><th>Duration</th><th>Disposition</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
 }
 
-const automationActionTypes = ['create_task','create_activity','change_stage','create_message_draft','wait','create_lead','update_lead','assign_owner','create_note','invoke_ai','call_webhook','notify_user','book_appointment','schedule_follow_up','send_communication','start_call'];
+const automationActionTypes = ['create_task','create_activity','change_stage','create_message_draft','wait','update_lead','assign_owner','create_note','invoke_ai','schedule_follow_up','send_communication','start_call'];
 
 function automationDefaultConfig(type) {
   if (type === 'create_task') return { title: 'Follow up', dueInMinutes: 60, assignTo: 'owner' };
