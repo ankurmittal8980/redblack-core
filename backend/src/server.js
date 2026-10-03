@@ -593,6 +593,10 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           }
           if (request.method === 'POST' && action === 'restore') {
             requirePermission(context, 'crm:write');
+            const identity = await db.query('SELECT email_normalized, phone_normalized FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NOT NULL', [workspaceId, leadId]);
+            if (!identity.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not in trash.');
+            const collision = await db.query('SELECT id FROM leads WHERE workspace_id=$1 AND deleted_at IS NULL AND id<>$2 AND (($3::text IS NOT NULL AND email_normalized=$3) OR ($4::text IS NOT NULL AND phone_normalized=$4)) LIMIT 1', [workspaceId, leadId, identity.rows[0].email_normalized, identity.rows[0].phone_normalized]);
+            if (collision.rows[0]) throw new HttpError(409, 'DUPLICATE_LEAD', 'An active lead already uses this email or phone.');
             const result = await db.query('UPDATE leads SET deleted_at = NULL, updated_at = now() WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NOT NULL RETURNING id', [workspaceId, leadId]);
             if (!result.rows[0]) throw new HttpError(404, 'LEAD_NOT_IN_TRASH', 'The lead is not in trash.');
             await audit(db, { workspaceId, actorUserId: current.userId, action: 'lead.restored', entityType: 'lead', entityId: leadId, request });
