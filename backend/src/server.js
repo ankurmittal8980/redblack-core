@@ -880,11 +880,11 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           requirePermission(context, 'workspace:manage'); const pipelineId = uuid(pipelineMatch[1], 'pipelineId'); const stageId = uuid(pipelineMatch[2].slice('stages/'.length), 'stageId'); const input = await body();
           const fields = []; const values = [pipelineId, stageId, workspaceId];
           let requestedPosition = null;
-          if (input.name !== undefined) { values.push(requiredString(input.name, 'name', { max: 120 })); fields.push(`name=${values.length}`); }
-          if (input.slug !== undefined) { values.push(slug(input.slug)); fields.push(`slug=${values.length}`); }
-          if (input.position !== undefined) { requestedPosition = Math.trunc(finiteNumber(input.position, 'position', { min: 0, max: 10000 })); values.push(requestedPosition); fields.push(`position=${values.length}`); }
-          if (input.isWon !== undefined) { if (typeof input.isWon !== 'boolean') throw new ValidationError('isWon must be a boolean.'); values.push(input.isWon); fields.push(`is_won=${values.length}`); }
-          if (input.isLost !== undefined) { if (typeof input.isLost !== 'boolean') throw new ValidationError('isLost must be a boolean.'); values.push(input.isLost); fields.push(`is_lost=${values.length}`); }
+          if (input.name !== undefined) { values.push(requiredString(input.name, 'name', { max: 120 })); fields.push(`name=$${values.length}`); }
+          if (input.slug !== undefined) { values.push(slug(input.slug)); fields.push(`slug=$${values.length}`); }
+          if (input.position !== undefined) { requestedPosition = Math.trunc(finiteNumber(input.position, 'position', { min: 0, max: 10000 })); values.push(requestedPosition); fields.push(`position=$${values.length}`); }
+          if (input.isWon !== undefined) { if (typeof input.isWon !== 'boolean') throw new ValidationError('isWon must be a boolean.'); values.push(input.isWon); fields.push(`is_won=$${values.length}`); }
+          if (input.isLost !== undefined) { if (typeof input.isLost !== 'boolean') throw new ValidationError('isLost must be a boolean.'); values.push(input.isLost); fields.push(`is_lost=$${values.length}`); }
           if (!fields.length) throw new HttpError(400, 'NO_FIELDS', 'Provide stage fields.');
           const updateStage = async client => {
             if (requestedPosition !== null) {
