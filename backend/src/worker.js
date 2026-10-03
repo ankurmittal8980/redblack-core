@@ -60,14 +60,14 @@ async function enqueueStageAutomations(client, run, { pipelineId, fromStageId, s
 async function executeAction(run, action, position) {
   if (!run.lead_id) throw new Error('This action requires a lead-linked automation run.');
   const config = action.config ?? {};
-  await transaction(pool, async client => {
+  return transaction(pool, async client => {
     await client.query(
       `INSERT INTO automation_action_runs(workspace_id, automation_run_id, version_id, position, status)
        VALUES($1,$2,$3,$4,'pending') ON CONFLICT(automation_run_id,position) DO NOTHING`,
       [run.workspace_id, run.id, run.version_id, position]
     );
     const prior = await client.query('SELECT status FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3 FOR UPDATE', [run.workspace_id, run.id, position]);
-    if (prior.rows[0]?.status === 'completed') return;
+    if (prior.rows[0]?.status === 'completed') return { skipped: true };
     await client.query("UPDATE automation_action_runs SET status='pending', result='{}'::jsonb WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3", [run.workspace_id, run.id, position]);
     let result = {};
     if (action.type === 'wait') {
@@ -131,6 +131,7 @@ async function executeAction(run, action, position) {
         WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3`,
       [run.workspace_id, run.id, position, JSON.stringify(result)]
     );
+    return { completed: true, wait: action.type === 'wait' };
   });
 }
 
@@ -139,7 +140,8 @@ export async function runOne(run) {
     const actions = run.definition?.actions;
     if (!Array.isArray(actions) || actions.length > 25) throw new Error('Automation version has an invalid action list.');
     for (let index = 0; index < actions.length; index += 1) {
-      try { await executeAction(run, actions[index], index); }
+      let outcome;
+      try { outcome = await executeAction(run, actions[index], index); }
       catch (error) {
         await pool.query(
           `INSERT INTO automation_action_runs(workspace_id, automation_run_id, version_id, position, status, result)
@@ -149,7 +151,7 @@ export async function runOne(run) {
         );
         throw error;
       }
-      if (actions[index].type === 'wait') return;
+      if (actions[index].type === 'wait' && !outcome?.skipped) return;
     }
     await pool.query("UPDATE automation_runs SET status='completed', completed_at=now(), error_message=NULL WHERE id=$1 AND status='running'", [run.id]);
   } catch (error) {
