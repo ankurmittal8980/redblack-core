@@ -110,6 +110,7 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   const leadB = (await db.query("INSERT INTO leads(workspace_id,first_name) VALUES($1,'Workspace B Lead') RETURNING id", [workspaceB])).rows[0].id;
   const oldTag = (await db.query("INSERT INTO tags(workspace_id,name) VALUES($1,'Old') RETURNING id", [workspaceA])).rows[0].id;
   const newTag = (await db.query("INSERT INTO tags(workspace_id,name) VALUES($1,'New') RETURNING id", [workspaceA])).rows[0].id;
+  const foreignTag = (await db.query("INSERT INTO tags(workspace_id,name) VALUES($1,'Foreign') RETURNING id", [workspaceB])).rows[0].id;
   await db.query('INSERT INTO lead_tags(workspace_id,lead_id,tag_id) VALUES($1,$2,$3)', [workspaceA, leadA, oldTag]);
   const pipelineId = (await db.query("INSERT INTO pipelines(workspace_id,name,slug) VALUES($1,'Bulk','bulk') RETURNING id", [workspaceA])).rows[0].id;
   const stageId = (await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'Qualified','qualified',1) RETURNING id", [pipelineId])).rows[0].id;
@@ -145,6 +146,11 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
     assert.deepEqual(ruleStates.rows[0], { active:false, priority:50 });
     const scoreState = await db.query('SELECT active,score_delta FROM crm_scoring_rules WHERE id=$1', [scoringRuleId]);
     assert.deepEqual(scoreState.rows[0], { active:false, score_delta:25 });
+
+    const invalidLeadEdit = await fetch(`http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/leads/${leadA}`, { method:'PATCH', headers, body:JSON.stringify({ status:'Should Roll Back', tagIds:[foreignTag] }) });
+    assert.equal(invalidLeadEdit.status, 400);
+    const rolledBackEdit = await db.query('SELECT status FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceA, leadA]);
+    assert.equal(rolledBackEdit.rows[0].status, 'New Lead');
 
     const createEndpoint = `http://127.0.0.1:${port}/api/v1/workspaces/${workspaceA}/leads`;
     const missingRequired = await fetch(createEndpoint, { method:'POST', headers, body:JSON.stringify({ firstName:'Missing Required' }) });
