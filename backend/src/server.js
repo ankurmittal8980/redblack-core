@@ -506,6 +506,7 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             if (visible.rows[0].count !== ids.length) throw new HttpError(403, 'LEAD_SCOPE_FORBIDDEN', 'One or more leads are outside your assignment scope.');
           }
           const operation = enumValue(input.operation, 'operation', ['trash','restore','status','owner','stage','tags']);
+          if (operation === 'owner' && !['owner','admin','manager'].includes(context.role)) throw new HttpError(403, 'OWNER_ASSIGNMENT_FORBIDDEN', 'Your role cannot reassign lead ownership.');
           if (operation === 'restore') {
             const conflicts = await db.query('SELECT l.id FROM leads l JOIN leads active ON active.workspace_id=l.workspace_id AND active.deleted_at IS NULL AND active.id<>l.id AND ((l.email_normalized IS NOT NULL AND active.email_normalized=l.email_normalized) OR (l.phone_normalized IS NOT NULL AND active.phone_normalized=l.phone_normalized)) WHERE l.workspace_id=$1 AND l.id=ANY($2::uuid[]) AND l.deleted_at IS NOT NULL LIMIT 1', [workspaceId, ids]);
             if (conflicts.rows[0]) throw new HttpError(409, 'DUPLICATE_LEAD', 'One or more leads conflict with an active email or phone.');
