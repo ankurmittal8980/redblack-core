@@ -115,6 +115,7 @@ function validateSchema(schema) {
 function validateCommon({ capability, workspaceId, actor }) {
   if (!workspaceId || typeof workspaceId !== 'string') fail('CAPABILITY_INPUT_INVALID', 'workspaceId is required.');
   if (!actor || typeof actor !== 'object' || !actor.userId || !actor.role) fail('CAPABILITY_UNAUTHORIZED', 'An authenticated workspace actor is required.', 401);
+  if (actor.workspaceId && actor.workspaceId !== workspaceId) fail('CAPABILITY_FORBIDDEN', 'Actor is outside this workspace.', 403);
   if (!CAPABILITIES.includes(capability)) fail('CAPABILITY_UNSUPPORTED', `Unsupported capability: ${capability}.`, 400);
 }
 function normalizeInput(capability, input = {}) {
@@ -131,10 +132,10 @@ function normalizeInput(capability, input = {}) {
   if (capability === 'sales_assistance') value.question = text(value.question, 'question', 2000);
   return value;
 }
-function contextEnvelope(context) {
+function contextEnvelope(context, maxContextChars = MAX.context) {
   if (context == null) return {};
   const serialized = JSON.stringify(context);
-  if (serialized.length > MAX.context) fail('CAPABILITY_CONTEXT_TOO_LARGE', 'Authorized CRM context exceeds the bounded limit.');
+  if (serialized.length > maxContextChars) fail('CAPABILITY_CONTEXT_TOO_LARGE', 'Authorized CRM context exceeds the bounded limit.');
   return JSON.parse(serialized);
 }
 function instructions(capability, input) {
@@ -159,7 +160,7 @@ export class CapabilityLayer {
   async executeCapability({ capability, workspaceId, actor, subject = null, input = {}, context = null, options = {} }) {
     validateCommon({ capability, workspaceId, actor });
     const authorized = await this.authorizeContext({ workspaceId, actor, subject, context });
-    const boundedContext = contextEnvelope(authorized);
+    const boundedContext = contextEnvelope(authorized, this.maxContextChars);
     const normalizedInput = normalizeInput(capability, input);
     const request = instructions(capability, normalizedInput);
     const result = await this.executor({ workspaceId, actor, subject, capability, messages: [
