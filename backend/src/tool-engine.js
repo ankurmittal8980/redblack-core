@@ -1,0 +1,539 @@
+import { createHash } from 'node:crypto';
+import { hasPermission } from './rbac.js';
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ROLE_NAMES = Object.freeze(['owner', 'admin', 'manager', 'agent', 'reporting', 'service']);
+const MAX_TIMEOUT_MS = 10_000;
+const RESULT_SCHEMA = Object.freeze({
+  type: 'object', additionalProperties: false,
+  properties: Object.freeze({
+    ok: Object.freeze({ type: 'boolean' }),
+    status: Object.freeze({ type: 'string', enum: Object.freeze(['success', 'validation_failure', 'authorization_denied', 'approval_required', 'not_found', 'conflict', 'timeout', 'transient_failure', 'permanent_failure']) }),
+    toolName: Object.freeze({ type: Object.freeze(['string', 'null']) }),
+    data: Object.freeze({}),
+    error: Object.freeze({
+      type: Object.freeze(['object', 'null']), additionalProperties: false,
+      properties: Object.freeze({ code: Object.freeze({ type: 'string' }), message: Object.freeze({ type: 'string' }) }),
+      required: Object.freeze(['code', 'message'])
+    }),
+    retryable: Object.freeze({ type: 'boolean' })
+  }),
+  required: Object.freeze(['ok', 'status', 'toolName', 'data', 'error', 'retryable'])
+});
+
+const string = (maxLength, options = {}) => Object.freeze({
+  type: options.nullable ? Object.freeze(['string', 'null']) : 'string',
+  maxLength,
+  ...(options.min !== undefined ? { minLength: options.min } : {})
+});
+const uuid = Object.freeze({ type: 'string', format: 'uuid' });
+const date = Object.freeze({ type: Object.freeze(['string', 'null']), format: 'date-time' });
+const integer = (minimum, maximum) => Object.freeze({ type: 'integer', minimum, maximum });
+const enumeration = (...values) => Object.freeze({ type: 'string', enum: Object.freeze(values) });
+const schema = (properties, required = []) => Object.freeze({
+  type: 'object',
+  properties: Object.freeze(properties),
+  required: Object.freeze(required),
+  additionalProperties: false
+});
+
+const DEFINITIONS = Object.freeze([
+  {
+    name: 'crm.leads.search', description: 'Search active leads visible in the current workspace.',
+    inputSchema: schema({ query: string(120, { min: 1 }), status: string(80), limit: integer(1, 100) }, ['query']),
+    classification: 'read', impact: 'low', permission: 'crm:read', timeoutMs: 4000,
+    executorKey: 'searchLeads', resultScope: 'leads'
+  },
+  {
+    name: 'crm.leads.get', description: 'Read one active lead and its safe CRM context.',
+    inputSchema: schema({ leadId: uuid }, ['leadId']),
+    classification: 'read', impact: 'low', permission: 'crm:read', timeoutMs: 4000,
+    executorKey: 'getLead', entity: { type: 'lead', field: 'leadId' }
+  },
+  {
+    name: 'crm.tasks.list', description: 'List tasks visible to the current actor.',
+    inputSchema: schema({ status: enumeration('pending', 'in_progress', 'completed', 'cancelled'), dueBefore: date, limit: integer(1, 100) }),
+    classification: 'read', impact: 'low', permission: 'crm:read', timeoutMs: 4000,
+    executorKey: 'listTasks', resultScope: 'tasks'
+  },
+  {
+    name: 'crm.pipelines.list', description: 'List pipelines and stages in the current workspace.',
+    inputSchema: schema({}),
+    classification: 'read', impact: 'low', permission: 'crm:read', timeoutMs: 4000,
+    executorKey: 'listPipelines', resultScope: 'pipelines'
+  },
+  {
+    name: 'crm.leads.timeline', description: 'Read activity and follow-up history for a visible lead.',
+    inputSchema: schema({ leadId: uuid, limit: integer(1, 100) }, ['leadId']),
+    classification: 'read', impact: 'low', permission: 'crm:read', timeoutMs: 4000,
+    executorKey: 'getLeadTimeline', entity: { type: 'lead', field: 'leadId' }
+  },
+  {
+    name: 'crm.messages.history', description: 'Read permitted communication history for a visible lead.',
+    inputSchema: schema({ leadId: uuid, limit: integer(1, 100) }, ['leadId']),
+    classification: 'read', impact: 'low', permission: 'crm:read', timeoutMs: 4000,
+    executorKey: 'getMessageHistory', entity: { type: 'lead', field: 'leadId' }, resultScope: 'messages'
+  },
+  {
+    name: 'knowledge.retrieve', description: 'Retrieve workspace knowledge through the injected Task 4 retriever.',
+    inputSchema: schema({ query: string(1000, { min: 1 }), limit: integer(1, 20) }, ['query']),
+    classification: 'read', impact: 'low', permission: 'crm:read', timeoutMs: 5000,
+    executorKey: 'retrieveKnowledge'
+  },
+  {
+    name: 'crm.tasks.create', description: 'Create one follow-up task for the current actor or a visible lead.',
+    inputSchema: schema({ leadId: uuid, title: string(240, { min: 1 }), description: string(5000, { nullable: true }), dueAt: date, priority: integer(0, 10), taskType: string(80) }, ['title']),
+    classification: 'write', impact: 'low', permission: 'crm:write', approvalRequired: false, timeoutMs: 5000,
+    executorKey: 'createTask', entity: { type: 'lead', field: 'leadId', optional: true }, auditEntityType: 'task'
+  },
+  {
+    name: 'crm.tasks.update', description: 'Update an allowlisted field on a task visible to the current actor.',
+    inputSchema: schema({ taskId: uuid, title: string(240, { min: 1 }), description: string(5000, { nullable: true }), dueAt: date, status: enumeration('pending', 'in_progress', 'completed', 'cancelled'), priority: integer(0, 10) }, ['taskId']),
+    classification: 'write', impact: 'low', permission: 'crm:write', approvalRequired: false, timeoutMs: 5000,
+    executorKey: 'updateTask', entity: { type: 'task', field: 'taskId' }, auditEntityType: 'task', requireMutableField: true
+  },
+  {
+    name: 'crm.activities.note.create', description: 'Add a note to a visible lead or to the actor activity stream.',
+    inputSchema: schema({ leadId: uuid, title: string(240, { min: 1 }), body: string(5000, { nullable: true }) }, ['title']),
+    classification: 'write', impact: 'low', permission: 'crm:write', approvalRequired: false, timeoutMs: 5000,
+    executorKey: 'createNote', entity: { type: 'lead', field: 'leadId', optional: true }, auditEntityType: 'activity'
+  },
+  {
+    name: 'crm.leads.update', description: 'Update explicitly supported qualification and follow-up fields on a visible lead.',
+    inputSchema: schema({ leadId: uuid, status: string(80), temperature: enumeration('hot', 'warm', 'cold'), score: integer(0, 10000), budget: Object.freeze({ type: Object.freeze(['number', 'null']), minimum: 0 }), location: string(240, { nullable: true }), requirement: string(5000, { nullable: true }), nextAction: string(500, { nullable: true }), nextActionAt: date }, ['leadId']),
+    classification: 'write', impact: 'moderate', permission: 'crm:write', approvalRequired: false, timeoutMs: 5000,
+    executorKey: 'updateLead', entity: { type: 'lead', field: 'leadId' }, auditEntityType: 'lead', requireMutableField: true
+  },
+  {
+    name: 'crm.leads.stage.change', description: 'Move a visible lead to a stage in its workspace pipeline.',
+    inputSchema: schema({ leadId: uuid, pipelineId: uuid, stageId: uuid }, ['leadId', 'pipelineId', 'stageId']),
+    classification: 'write', impact: 'moderate', permission: 'crm:write', approvalRequired: false, timeoutMs: 5000,
+    executorKey: 'changeLeadStage', entity: { type: 'lead', field: 'leadId' }, auditEntityType: 'lead'
+  },
+  {
+    name: 'crm.leads.assign', description: 'Reassign a visible lead to an active workspace member after trusted approval.',
+    inputSchema: schema({ leadId: uuid, assigneeId: uuid }, ['leadId', 'assigneeId']),
+    classification: 'write', impact: 'high', permission: 'crm:write', allowedRoles: Object.freeze(['owner', 'admin', 'manager']), approvalRequired: true, timeoutMs: 5000,
+    executorKey: 'assignLead', entity: { type: 'lead', field: 'leadId' }, auditEntityType: 'lead'
+  },
+  {
+    name: 'crm.messages.draft.create', description: 'Create a communication draft for a visible lead; does not send it.',
+    inputSchema: schema({ leadId: uuid, channel: enumeration('email', 'whatsapp', 'rcs'), subject: string(500, { nullable: true }), body: string(10000, { min: 1 }) }, ['leadId', 'channel', 'body']),
+    classification: 'write', impact: 'low', permission: 'crm:write', approvalRequired: false, timeoutMs: 5000,
+    executorKey: 'createMessageDraft', entity: { type: 'lead', field: 'leadId' }, auditEntityType: 'message', consentRequired: true
+  }
+]);
+
+const DEFINITIONS_BY_NAME = new Map(DEFINITIONS.map(definition => [definition.name, definition]));
+
+class ToolFault extends Error {
+  constructor(code) { super(code); this.code = code; }
+}
+
+function isPlainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (isPlainObject(value)) return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+  return JSON.stringify(value);
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function validateField(value, field, name) {
+  const nullable = Array.isArray(field.type) && field.type.includes('null');
+  const type = Array.isArray(field.type) ? field.type.find(item => item !== 'null') : field.type;
+  if (value === null && nullable) return null;
+  if (field.format === 'uuid') {
+    if (typeof value !== 'string' || !UUID_PATTERN.test(value)) throw new ToolFault('INVALID_INPUT');
+    return value.toLowerCase();
+  }
+  if (type === 'string' && field.enum) {
+    if (typeof value !== 'string' || !field.enum.includes(value)) throw new ToolFault('INVALID_INPUT');
+    return value;
+  }
+  if (type === 'string' && field.format === 'date-time') {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) throw new ToolFault('INVALID_INPUT');
+    return new Date(value).toISOString();
+  }
+  if (type === 'string') {
+    if (typeof value !== 'string' || (field.minLength !== undefined && value.trim().length < field.minLength) || value.length > field.maxLength) throw new ToolFault('INVALID_INPUT');
+    return value.trim();
+  }
+  if (type === 'integer') {
+    if (!Number.isInteger(value) || value < field.minimum || value > field.maximum) throw new ToolFault('INVALID_INPUT');
+    return value;
+  }
+  if (type === 'number') {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < field.minimum) throw new ToolFault('INVALID_INPUT');
+    return value;
+  }
+  throw new ToolFault('INVALID_INPUT');
+}
+
+function validateInput(definition, input) {
+  if (!isPlainObject(input)) throw new ToolFault('INVALID_INPUT');
+  const allowed = new Set(Object.keys(definition.inputSchema.properties));
+  if (Object.keys(input).some(key => !allowed.has(key))) throw new ToolFault('INVALID_INPUT');
+  if (definition.inputSchema.required.some(key => !Object.hasOwn(input, key))) throw new ToolFault('INVALID_INPUT');
+  const result = {};
+  for (const [key, value] of Object.entries(input)) result[key] = validateField(value, definition.inputSchema.properties[key], key);
+  if (definition.requireMutableField && Object.keys(result).every(key => key === 'leadId' || key === 'taskId')) throw new ToolFault('INVALID_INPUT');
+  return result;
+}
+
+function trustedContext(value, definition) {
+  if (!isPlainObject(value) || !UUID_PATTERN.test(value.workspaceId ?? '') || !UUID_PATTERN.test(value.actorUserId ?? '') || !ROLE_NAMES.includes(value.role)) {
+    throw new ToolFault('UNTRUSTED_CONTEXT');
+  }
+  if (definition.classification === 'write' && (typeof value.idempotencyKey !== 'string' || value.idempotencyKey.length < 8 || value.idempotencyKey.length > 200)) {
+    throw new ToolFault('IDEMPOTENCY_KEY_REQUIRED');
+  }
+  return Object.freeze({
+    workspaceId: value.workspaceId.toLowerCase(), actorUserId: value.actorUserId.toLowerCase(), role: value.role,
+    correlationId: typeof value.correlationId === 'string' ? value.correlationId.slice(0, 200) : null,
+    runId: typeof value.runId === 'string' ? value.runId.slice(0, 120) : null,
+    idempotencyKey: value.idempotencyKey,
+    approvalContext: isPlainObject(value.approvalContext) ? Object.freeze({ ...value.approvalContext }) : null
+  });
+}
+
+function publicDefinition(definition) {
+  return Object.freeze({
+    name: definition.name, description: definition.description, inputSchema: definition.inputSchema,
+    resultSchema: RESULT_SCHEMA,
+    classification: definition.classification, impact: definition.impact,
+    approvalRequired: definition.approvalRequired ?? false,
+    consentRequired: definition.consentRequired ?? false,
+    timeoutMs: definition.timeoutMs,
+    idempotencyRequired: definition.classification === 'write',
+    idempotency: Object.freeze({
+      required: definition.classification === 'write',
+      scope: 'workspace_actor_role_tool_input',
+      durable: definition.classification === 'write'
+    }),
+    authorizationPolicy: Object.freeze({
+      identifier: definition.permission,
+      permission: definition.permission,
+      allowedRoles: Object.freeze(ROLE_NAMES.filter(role => hasPermission(role, definition.permission) && (!definition.allowedRoles || definition.allowedRoles.includes(role)))),
+      recordScope: definition.entity?.type ?? null
+    })
+  });
+}
+
+function success(toolName, data) {
+  const safeData = sanitize(data);
+  if (JSON.stringify(safeData).length > 20_000) throw new ToolFault('INVALID_EXECUTOR_RESULT');
+  return { ok: true, status: 'success', toolName, data: safeData, error: null, retryable: false };
+}
+
+const ERROR_RESPONSES = Object.freeze({
+  INVALID_INPUT: ['validation_failure', 'Tool input does not match the registered schema.', false],
+  UNTRUSTED_CONTEXT: ['authorization_denied', 'Trusted actor context is required.', false],
+  FORBIDDEN: ['authorization_denied', 'The current actor is not authorized for this tool.', false],
+  RECORD_NOT_FOUND: ['not_found', 'The requested record is not available.', false],
+  APPROVAL_REQUIRED: ['approval_required', 'A matching trusted approval is required.', false],
+  IDEMPOTENCY_KEY_REQUIRED: ['validation_failure', 'A trusted idempotency key is required for this write.', false],
+  IDEMPOTENCY_CONFLICT: ['conflict', 'The idempotency key was already used for a different action.', false],
+  IDEMPOTENCY_IN_PROGRESS: ['conflict', 'An action with this idempotency key is already in progress.', true],
+  DO_NOT_CONTACT: ['authorization_denied', 'This lead is suppressed from communications.', false],
+  CONSENT_REQUIRED: ['authorization_denied', 'The lead has not opted in to this communication channel.', false],
+  DOMAIN_CONFLICT: ['conflict', 'The requested change conflicts with the current record state.', false],
+  DATABASE_UNAVAILABLE: ['transient_failure', 'A temporary Core storage error prevented this tool.', true],
+  EXECUTOR_UNAVAILABLE: ['transient_failure', 'This tool is not connected to an available Core service.', true],
+  TOOL_TIMEOUT: ['timeout', 'The tool exceeded its execution time limit.', true],
+  EXECUTOR_FAILED: ['permanent_failure', 'The Core service could not complete this tool.', false],
+  INVALID_EXECUTOR_RESULT: ['permanent_failure', 'The Core service returned an invalid tool result.', false]
+});
+
+function normalizedErrorCode(error) {
+  if (Object.hasOwn(ERROR_RESPONSES, error?.code)) return error.code;
+  if (error?.status === 403) return 'FORBIDDEN';
+  if (error?.status === 404) return 'RECORD_NOT_FOUND';
+  if (error?.status === 409) return 'DOMAIN_CONFLICT';
+  if (error?.code === '57014') return 'TOOL_TIMEOUT';
+  if (typeof error?.code === 'string' && (error.code.startsWith('08') || ['40001', '40P01', '53300', '55P03', '57P01', '57P02', '57P03'].includes(error.code))) return 'DATABASE_UNAVAILABLE';
+  if (typeof error?.code === 'string' && error.code.startsWith('23')) return 'DOMAIN_CONFLICT';
+  return 'EXECUTOR_FAILED';
+}
+
+function failure(toolName, error) {
+  const code = normalizedErrorCode(error);
+  const [status, message, retryable] = ERROR_RESPONSES[code];
+  return { ok: false, status, toolName: toolName ?? null, data: null, error: { code, message }, retryable };
+}
+
+function sanitize(value, depth = 0) {
+  if (depth > 6) throw new ToolFault('INVALID_EXECUTOR_RESULT');
+  if (typeof value === 'string' && value.length > 20_000) throw new ToolFault('INVALID_EXECUTOR_RESULT');
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (Array.isArray(value)) {
+    if (value.length > 100) throw new ToolFault('INVALID_EXECUTOR_RESULT');
+    return value.map(item => sanitize(item, depth + 1));
+  }
+  if (!isPlainObject(value)) throw new ToolFault('INVALID_EXECUTOR_RESULT');
+  const result = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (/password|secret|token|credential|authorization|cookie|private.?key|stack|sql/i.test(key)) continue;
+    result[key] = sanitize(item, depth + 1);
+  }
+  if (JSON.stringify(result).length > 20_000) throw new ToolFault('INVALID_EXECUTOR_RESULT');
+  return result;
+}
+
+function withTimeout(timeoutMs, operation) {
+  const controller = new AbortController();
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new ToolFault('TOOL_TIMEOUT'));
+    }, timeoutMs);
+  });
+  const work = Promise.resolve().then(() => operation(controller.signal));
+  return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+function throwIfAborted(signal) {
+  if (signal.aborted) throw new ToolFault('TOOL_TIMEOUT');
+}
+
+async function withTransaction(db, callback) {
+  if (typeof db?.connect !== 'function') throw new ToolFault('EXECUTOR_UNAVAILABLE');
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function assertEntityVisible(db, definition, input, context) {
+  if (!definition.entity || definition.entity.optional && input[definition.entity.field] === undefined) return;
+  const entityId = input[definition.entity.field];
+  let result;
+  if (definition.entity.type === 'lead') {
+    result = await db.query(
+      `SELECT l.id FROM leads l WHERE l.workspace_id=$1 AND l.id=$2 AND l.deleted_at IS NULL
+       AND ($3 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$4 AND a.unassigned_at IS NULL))`,
+      [context.workspaceId, entityId, context.role, context.actorUserId]
+    );
+  } else if (definition.entity.type === 'task') {
+    result = await db.query(
+      `SELECT t.id FROM tasks t WHERE t.workspace_id=$1 AND t.id=$2 AND ($3 <> 'agent' OR t.assigned_to=$4)`,
+      [context.workspaceId, entityId, context.role, context.actorUserId]
+    );
+  }
+  if (!result?.rows?.[0]) throw new ToolFault('RECORD_NOT_FOUND');
+}
+
+async function assertCommunicationConsent(db, definition, input, context) {
+  if (!definition.consentRequired) return;
+  const result = await db.query(
+    `SELECT l.do_not_contact, c.opted_in FROM leads l
+     LEFT JOIN communication_consents c ON c.workspace_id=l.workspace_id AND c.lead_id=l.id AND c.channel=$3
+     WHERE l.workspace_id=$1 AND l.id=$2 AND l.deleted_at IS NULL`,
+    [context.workspaceId, input.leadId, input.channel]
+  );
+  const consent = result?.rows?.[0];
+  if (!consent) throw new ToolFault('RECORD_NOT_FOUND');
+  if (consent.do_not_contact === true) throw new ToolFault('DO_NOT_CONTACT');
+  if (consent.opted_in !== true) throw new ToolFault('CONSENT_REQUIRED');
+}
+
+async function filterScopedRows(db, scope, rows, context) {
+  if (!scope) return rows;
+  if (typeof db?.query !== 'function') throw new ToolFault('EXECUTOR_UNAVAILABLE');
+  if (!Array.isArray(rows) || rows.length > 100 || rows.some(row => !isPlainObject(row) || !UUID_PATTERN.test(row.id ?? ''))) throw new ToolFault('INVALID_EXECUTOR_RESULT');
+  if (!rows.length) return rows;
+  const ids = rows.map(row => row.id);
+  let result;
+  if (scope === 'leads') {
+    result = await db.query(
+      `SELECT l.id FROM leads l WHERE l.workspace_id=$1 AND l.id=ANY($2::uuid[]) AND l.deleted_at IS NULL
+       AND ($3 <> 'agent' OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=l.workspace_id AND a.lead_id=l.id AND a.user_id=$4 AND a.unassigned_at IS NULL))`,
+      [context.workspaceId, ids, context.role, context.actorUserId]
+    );
+  } else if (scope === 'tasks') {
+    result = await db.query("SELECT id FROM tasks WHERE workspace_id=$1 AND id=ANY($2::uuid[]) AND ($3 <> 'agent' OR assigned_to=$4)", [context.workspaceId, ids, context.role, context.actorUserId]);
+  } else if (scope === 'messages') {
+    result = await db.query(
+      `SELECT m.id FROM messages m WHERE m.workspace_id=$1 AND m.id=ANY($2::uuid[])
+       AND ($3 <> 'agent' OR EXISTS (
+        SELECT 1 FROM lead_assignments a WHERE a.workspace_id=m.workspace_id AND a.lead_id=m.lead_id AND a.user_id=$4 AND a.unassigned_at IS NULL))`,
+      [context.workspaceId, ids, context.role, context.actorUserId]
+    );
+  } else if (scope === 'pipelines') {
+    result = await db.query('SELECT id FROM pipelines WHERE workspace_id=$1 AND id=ANY($2::uuid[])', [context.workspaceId, ids]);
+  }
+  const allowed = new Set((result?.rows ?? []).map(row => row.id));
+  return rows.filter(row => allowed.has(row.id));
+}
+
+function resultRows(result) {
+  if (Array.isArray(result)) return result;
+  if (isPlainObject(result) && Array.isArray(result.data)) return result.data;
+  return null;
+}
+
+function idempotencyHash(definition, input) {
+  return sha256(canonical({ toolName: definition.name, input }));
+}
+
+async function writeAudit(db, context, definition, input, output, inputHash, resultStatus) {
+  const candidateId = output?.data?.id ?? input.leadId ?? input.taskId ?? null;
+  const entityId = typeof candidateId === 'string' && UUID_PATTERN.test(candidateId) ? candidateId : null;
+  const metadata = {
+    toolName: definition.name,
+    classification: definition.classification,
+    impact: definition.impact,
+    correlationId: context.correlationId,
+    runId: context.runId,
+    resultStatus,
+    approvalId: context.approvalContext?.approvalId ?? null,
+    idempotencyRef: context.idempotencyKey ? sha256(context.idempotencyKey) : null,
+    inputHash
+  };
+  await db.query(
+    `INSERT INTO audit_logs(workspace_id, actor_user_id, action, entity_type, entity_id, metadata)
+     VALUES($1,$2,$3,$4,$5,$6::jsonb)`,
+    [context.workspaceId, context.actorUserId, 'agent_tool.executed', definition.auditEntityType ?? 'tool', entityId, JSON.stringify(metadata)]
+  );
+}
+
+async function auditFailure(db, context, definition, error, inputHash) {
+  if (!db?.query || !context || !definition?.classification) return;
+  const code = normalizedErrorCode(error);
+  const metadata = {
+    toolName: definition.name, classification: definition.classification, impact: definition.impact,
+    resultStatus: ERROR_RESPONSES[code][0], errorCode: code,
+    correlationId: context.correlationId, runId: context.runId,
+    idempotencyRef: context.idempotencyKey ? sha256(context.idempotencyKey) : null, inputHash
+  };
+  try {
+    await db.query('INSERT INTO audit_logs(workspace_id, actor_user_id, action, entity_type, metadata) VALUES($1,$2,$3,$4,$5::jsonb)',
+      [context.workspaceId, context.actorUserId, 'agent_tool.denied_or_failed', 'tool', JSON.stringify(metadata)]);
+  } catch { /* Failure audit is best effort; never replace the normalized tool result. */ }
+}
+
+async function verifyApproval(definition, context, input, inputHash, verifier, signal) {
+  if (!definition.approvalRequired) return;
+  const approval = context.approvalContext;
+  if (!approval || typeof approval.approvalId !== 'string' || !verifier) throw new ToolFault('APPROVAL_REQUIRED');
+  let accepted = false;
+  try {
+    accepted = await verifier({ approvalContext: approval, context, toolName: definition.name, inputHash, signal });
+  } catch (error) {
+    if (signal?.aborted) throw new ToolFault('TOOL_TIMEOUT');
+    accepted = false;
+  }
+  if (accepted !== true) throw new ToolFault('APPROVAL_REQUIRED');
+}
+
+/**
+ * Create the fixed Core tool registry. Executors are trusted server-side domain services;
+ * model text can choose only a registered name and validated arguments. Write executors
+ * must use the transaction client they receive and must not call external providers.
+ */
+export function createToolEngine({ db, executors = {}, verifyApproval: approvalVerifier = null, timeoutMs = MAX_TIMEOUT_MS } = {}) {
+  const defaultTimeout = Number.isInteger(timeoutMs) ? Math.min(Math.max(timeoutMs, 100), MAX_TIMEOUT_MS) : MAX_TIMEOUT_MS;
+
+  async function execute(request = {}) {
+    const requestIsValid = isPlainObject(request);
+    const toolName = requestIsValid ? request.toolName : null;
+    const input = requestIsValid ? request.input ?? {} : null;
+    const context = requestIsValid ? request.context : null;
+    const definition = DEFINITIONS_BY_NAME.get(toolName);
+    if (!definition) return failure(typeof toolName === 'string' ? toolName.slice(0, 120) : null, new ToolFault('INVALID_INPUT'));
+    let trusted;
+    let normalized;
+    let hash = null;
+    try {
+      normalized = validateInput(definition, input);
+      trusted = trustedContext(context, definition);
+      if (!hasPermission(trusted.role, definition.permission) || definition.allowedRoles && !definition.allowedRoles.includes(trusted.role)) throw new ToolFault('FORBIDDEN');
+      hash = idempotencyHash(definition, normalized);
+      const limit = Math.min(definition.timeoutMs, defaultTimeout);
+      await withTimeout(limit, signal => verifyApproval(definition, trusted, normalized, hash, approvalVerifier, signal));
+      const executor = executors[definition.executorKey];
+      if (typeof executor !== 'function') throw new ToolFault('EXECUTOR_UNAVAILABLE');
+
+      if (definition.classification === 'read') {
+        if (definition.entity && !db?.query) throw new ToolFault('EXECUTOR_UNAVAILABLE');
+        const output = await withTimeout(limit, async signal => {
+          await assertEntityVisible(db, definition, normalized, trusted);
+          throwIfAborted(signal);
+          await assertCommunicationConsent(db, definition, normalized, trusted);
+          throwIfAborted(signal);
+          const executorOutput = await executor({ db, context: trusted, input: normalized, signal });
+          throwIfAborted(signal);
+          if (!definition.resultScope) return executorOutput;
+          const rows = resultRows(executorOutput);
+          if (rows === null) throw new ToolFault('INVALID_EXECUTOR_RESULT');
+          const scoped = await filterScopedRows(db, definition.resultScope, rows, trusted);
+          throwIfAborted(signal);
+          return { data: scoped };
+        });
+        return success(definition.name, output);
+      }
+
+      if (!db?.connect) throw new ToolFault('EXECUTOR_UNAVAILABLE');
+      return await withTimeout(limit, signal => withTransaction(db, async client => {
+        throwIfAborted(signal);
+        await client.query("SELECT set_config('statement_timeout', $1, true)", [`${limit}ms`]);
+        const claimed = await client.query(
+          `INSERT INTO agent_tool_idempotency(idempotency_key,workspace_id,actor_user_id,actor_role,tool_name,input_hash,status)
+           VALUES($1,$2,$3,$4,$5,$6,'in_progress') ON CONFLICT(idempotency_key) DO NOTHING RETURNING idempotency_key`,
+          [trusted.idempotencyKey, trusted.workspaceId, trusted.actorUserId, trusted.role, definition.name, hash]
+        );
+        if (!claimed.rows[0]) {
+          const previous = await client.query('SELECT workspace_id,actor_user_id,actor_role,tool_name,input_hash,status,result FROM agent_tool_idempotency WHERE idempotency_key=$1 FOR UPDATE', [trusted.idempotencyKey]);
+          const item = previous.rows[0];
+          if (!item || item.workspace_id !== trusted.workspaceId || item.actor_user_id !== trusted.actorUserId || item.actor_role !== trusted.role || item.tool_name !== definition.name || item.input_hash.trim() !== hash) throw new ToolFault('IDEMPOTENCY_CONFLICT');
+          if (item.status === 'completed' && item.result) return item.result;
+          throw new ToolFault('IDEMPOTENCY_IN_PROGRESS');
+        }
+        throwIfAborted(signal);
+        await assertEntityVisible(client, definition, normalized, trusted);
+        throwIfAborted(signal);
+        await assertCommunicationConsent(client, definition, normalized, trusted);
+        throwIfAborted(signal);
+        const output = await executor({ db: client, context: trusted, input: normalized, signal });
+        throwIfAborted(signal);
+        const envelope = success(definition.name, output);
+        await writeAudit(client, trusted, definition, normalized, envelope, hash, 'success');
+        await client.query('UPDATE agent_tool_idempotency SET status=\'completed\',result=$2::jsonb,updated_at=now() WHERE idempotency_key=$1', [trusted.idempotencyKey, JSON.stringify(envelope)]);
+        throwIfAborted(signal);
+        return envelope;
+      }));
+    } catch (error) {
+      if (trusted && definition.classification === 'write') await auditFailure(db, trusted, definition, error, hash);
+      return failure(definition.name, error);
+    }
+  }
+
+  return Object.freeze({
+    listTools() { return DEFINITIONS.map(publicDefinition); },
+    execute
+  });
+}
+
+export const TOOL_ENGINE_CONTRACT = Object.freeze({
+  request: Object.freeze(['toolName', 'input', 'context']),
+  response: Object.freeze(['ok', 'status', 'toolName', 'data', 'error', 'retryable']),
+  resultSchema: RESULT_SCHEMA,
+  context: Object.freeze(['workspaceId', 'actorUserId', 'role', 'correlationId', 'runId', 'idempotencyKey', 'approvalContext'])
+});

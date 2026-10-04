@@ -1,0 +1,11 @@
+# Agent tool engine
+
+`backend/src/tool-engine.js` is the fixed, fail-closed registry for agent tools. It exports `createToolEngine({ db, executors, verifyApproval, timeoutMs })`; each executor is a trusted server-side domain function keyed by the registry's `executorKey`. Each receives `{ db, context, input, signal }` and must honor abort signals. Write executors must use the transaction client passed as `db` and must not perform provider I/O. External delivery stays behind the existing communications service and requires its own authorization/approval path.
+
+The model may select only a registered tool name and validated JSON Schema arguments. It cannot supply the actor, role, workspace, approval, SQL, URL, or executor. The calling server must build `context` from authenticated request/run state; never pass model-authored context. Unknown tools, unknown arguments, unavailable executors, and untrusted context fail closed. `TOOL_ENGINE_CONTRACT` documents the request (`toolName`, `input`, `context`) and result envelope for a Task 8 adapter to Task 6's ToolExecutor seam.
+
+Every write requires a trusted idempotency key. The PostgreSQL migration stores a scoped input hash and normalized result in the same transaction as the domain write and audit event. Reusing a key for different input, actor, workspace, role, or tool returns a conflict. High-impact reassignment requires a verifier to approve the exact normalized input hash; a boolean or model-supplied approval argument is not accepted.
+
+Tool results use `{ ok, status, toolName, data, error, retryable }`. Errors are stable and sanitized. Entity reads and list rows are checked against the trusted workspace; agent records are additionally checked against active assignment visibility. Message draft creation checks the lead's do-not-contact state and channel opt-in, and exposes no send tool. Executors must return bounded, safe domain data; output sanitization removes secret-like fields and rejects oversized or unsupported structures.
+
+This repository currently implements CRM routes in `backend/src/server.js` rather than reusable domain services. The engine intentionally does not duplicate that route logic: inject existing domain services as executors when connecting the agent runtime. An unconnected tool returns `EXECUTOR_UNAVAILABLE`; it never returns fake or unscoped data.

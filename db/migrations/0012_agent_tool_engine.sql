@@ -1,0 +1,17 @@
+CREATE TABLE agent_tool_idempotency (
+  idempotency_key text PRIMARY KEY CHECK (length(idempotency_key) BETWEEN 8 AND 200),
+  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  actor_user_id uuid NOT NULL,
+  actor_role text NOT NULL CHECK (actor_role IN ('owner','admin','manager','agent','reporting','service')),
+  tool_name text NOT NULL CHECK (length(tool_name) BETWEEN 1 AND 120),
+  input_hash char(64) NOT NULL,
+  status text NOT NULL CHECK (status IN ('in_progress','completed')),
+  result jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK ((status = 'in_progress' AND result IS NULL) OR (status = 'completed' AND result IS NOT NULL)),
+  FOREIGN KEY (workspace_id, actor_user_id) REFERENCES workspace_members(workspace_id, user_id) ON DELETE CASCADE
+);
+
+CREATE INDEX agent_tool_idempotency_workspace_created_idx
+  ON agent_tool_idempotency(workspace_id, created_at DESC);
