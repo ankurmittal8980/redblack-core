@@ -139,6 +139,7 @@ export class PostgresKeywordRetriever {
   async retrieve(db, { actor, query, topK, filters }) {
     const values = [actor.workspaceId, query, actor.role, actor.userId];
     const where = ["d.workspace_id=$1", "d.status='ready'", "d.current_version_id=v.id", "v.status='ready'", "s.status='active'", "c.search_vector @@ plainto_tsquery('simple',$2)",
+      "(d.linked_lead_id IS NULL OR EXISTS (SELECT 1 FROM leads l WHERE l.workspace_id=d.workspace_id AND l.id=d.linked_lead_id AND l.deleted_at IS NULL))",
       "($3 <> 'agent' OR d.linked_lead_id IS NULL OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=d.workspace_id AND a.lead_id=d.linked_lead_id AND a.user_id=$4 AND a.unassigned_at IS NULL))"];
     const bind = value => { values.push(value); return `$${values.length}`; };
     if (filters.sourceIds) where.push(`s.id=ANY(${bind(filters.sourceIds)}::uuid[])`);
@@ -389,6 +390,7 @@ export function createKnowledgeService({ db, indexer = new PostgresKeywordIndexe
       FROM knowledge_documents d JOIN knowledge_sources s ON s.workspace_id=d.workspace_id AND s.id=d.source_id AND s.status='active'
       LEFT JOIN knowledge_document_versions v ON v.workspace_id=d.workspace_id AND v.document_id=d.id AND v.id=d.current_version_id
       WHERE d.workspace_id=$1 AND d.id=$2 AND d.status<>'archived'
+        AND (d.linked_lead_id IS NULL OR EXISTS (SELECT 1 FROM leads l WHERE l.workspace_id=d.workspace_id AND l.id=d.linked_lead_id AND l.deleted_at IS NULL))
         AND ($3<>'agent' OR d.linked_lead_id IS NULL OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=d.workspace_id AND a.lead_id=d.linked_lead_id AND a.user_id=$4 AND a.unassigned_at IS NULL))`,
     [actor.workspaceId, document, actor.role, actor.userId]);
     if (!result.rows[0]) fail('KNOWLEDGE_NOT_FOUND', 'Knowledge document was not found.', 404);
@@ -405,6 +407,7 @@ export function createKnowledgeService({ db, indexer = new PostgresKeywordIndexe
       JOIN knowledge_document_versions v ON v.workspace_id=c.workspace_id AND v.document_id=c.document_id AND v.id=c.version_id AND v.status='ready'
       JOIN knowledge_sources s ON s.workspace_id=d.workspace_id AND s.id=d.source_id AND s.status='active'
       WHERE c.workspace_id=$1 AND c.id=$2 AND d.status='ready'
+        AND (d.linked_lead_id IS NULL OR EXISTS (SELECT 1 FROM leads l WHERE l.workspace_id=d.workspace_id AND l.id=d.linked_lead_id AND l.deleted_at IS NULL))
         AND ($3<>'agent' OR d.linked_lead_id IS NULL OR EXISTS (SELECT 1 FROM lead_assignments a WHERE a.workspace_id=d.workspace_id AND a.lead_id=d.linked_lead_id AND a.user_id=$4 AND a.unassigned_at IS NULL))`,
     [actor.workspaceId, chunk, actor.role, actor.userId]);
     if (!result.rows[0]) fail('KNOWLEDGE_NOT_FOUND', 'Knowledge chunk was not found.', 404);
