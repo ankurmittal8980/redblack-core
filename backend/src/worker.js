@@ -300,11 +300,12 @@ export async function runOne(run) {
     const retryable = failureCount < 3;
     const backoffSeconds = Math.min(300, 2 ** (failureCount - 1));
     await pool.query(
-      `UPDATE automation_runs SET status=$2, error_message=$3, completed_at=CASE WHEN $2='failed' THEN now() ELSE NULL END,
-          retry_after=CASE WHEN $2='queued' THEN now()+($4::text || ' seconds')::interval ELSE NULL END,
+      `UPDATE automation_runs SET status=$2::automation_run_status, error_message=$3,
+          completed_at=CASE WHEN $6::boolean THEN now() ELSE NULL END,
+          retry_after=CASE WHEN $7::boolean THEN now()+($4::text || ' seconds')::interval ELSE NULL END,
           metadata=jsonb_set(COALESCE(metadata,'{}'::jsonb),'{failureCount}',to_jsonb($5::int),true)
         WHERE id=$1`,
-      [run.id, retryable ? 'queued' : 'failed', String(error.message).slice(0, 1000), String(backoffSeconds), failureCount]
+      [run.id, retryable ? 'queued' : 'failed', String(error.message).slice(0, 1000), String(backoffSeconds), failureCount, !retryable, retryable]
     );
     process.stderr.write(JSON.stringify({ level: 'error', automationRunId: run.id, code: error.code ?? null, message: error.message }) + '\n');
   }

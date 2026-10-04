@@ -36,9 +36,10 @@ test('CRM daily workspace and builder contracts are present', () => {
   assert.match(app, /async function renderToday/);
   assert.match(app, /leadEditForm/);
   assert.match(app, /select-all-leads/);
-  assert.match(app, /Trigger \/ condition JSON/);
+  assert.match(app, /Visual automation builder/);
   assert.match(app, /automationSteps/);
-  assert.match(app, /data-automation-step/);
+  assert.match(app, /data-automation-node/);
+  assert.match(app, /add-condition-group/);
   assert.match(app, /dragstart/);
   assert.match(app, /automation-runs/);
   assert.match(server, /operation\s*===\s*'status'/);

@@ -206,6 +206,8 @@ tbody tr:hover { background: #fdfbfb; }
   .toolbar input { flex: 1 1 100%; max-width: none; }
   .toolbar select { flex: 1; max-width: none; }
   .field-grid { grid-template-columns: 1fr; }
+  .workflow-condition-rule { grid-template-columns: 1fr; }
+  .workflow-connection { align-items: stretch !important; flex-direction: column; }
   .field-grid .span-2 { grid-column: auto; }
   .key-value { grid-template-columns: 120px minmax(0,1fr); }
 }
