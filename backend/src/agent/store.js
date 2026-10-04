@@ -1,0 +1,39 @@
+import { randomUUID } from 'node:crypto';
+import { fail } from './contracts.js';
+
+export class InMemoryAgentRunStore {
+  constructor() { this.runs = new Map(); this.idempotency = new Map(); }
+  async create(input) {
+    const key = `${input.workspaceId}:${input.idempotencyKey}`;
+    if (this.idempotency.has(key)) return structuredClone(this.runs.get(this.idempotency.get(key)));
+    const now = new Date().toISOString();
+    const run = { ...structuredClone(input), id: input.id ?? randomUUID(), status: 'pending', stepCount: 0, createdAt: now, updatedAt: now, startedAt: null, finishedAt: null, pauseReason: null, pendingTool: null, approval: null, result: null, error: null, journal: [], version: 1 };
+    this.runs.set(run.id, run); this.idempotency.set(key, run.id); return structuredClone(run);
+  }
+  async get(id) { const run = this.runs.get(id); return run ? structuredClone(run) : null; }
+  async save(run) {
+    if (!this.runs.has(run.id)) fail('AGENT_RUN_NOT_FOUND', 'Agent run not found.', 404);
+    const saved = { ...structuredClone(run), updatedAt: new Date().toISOString(), version: Number(run.version ?? 0) + 1 };
+    this.runs.set(saved.id, saved); return structuredClone(saved);
+  }
+}
+
+export class PostgresAgentRunStore {
+  constructor({ query }) { if (typeof query !== 'function') fail('AGENT_STORE_INVALID', 'Postgres store requires a query function.', 500); this.query = query; }
+  async create(input) {
+    const id = input.id ?? randomUUID();
+    const payload = JSON.stringify({ ...input, id, status:'pending', stepCount:0, journal:[], pendingTool:null, approval:null, result:null, error:null });
+    const { rows } = await this.query(`INSERT INTO ai_agent_runs (id, workspace_id, initiating_actor, agent_definition_id, goal, status, step_count, correlation_id, idempotency_key, deadline_at, state) VALUES ($1,$2,$3,$4,$5,'pending',0,$6,$7,$8,$9::jsonb) ON CONFLICT (workspace_id, idempotency_key) DO UPDATE SET updated_at=ai_agent_runs.updated_at RETURNING *`, [id,input.workspaceId,input.initiatingActor,input.definition.id,input.goal,input.correlationId,input.idempotencyKey,input.deadlineAt,payload]);
+    return this.#fromRow(rows[0]);
+  }
+  async get(id) { const { rows } = await this.query('SELECT * FROM ai_agent_runs WHERE id=$1', [id]); return rows[0] ? this.#fromRow(rows[0]) : null; }
+  async save(run) {
+    const { rows } = await this.query(`UPDATE ai_agent_runs SET status=$2, step_count=$3, state=$4::jsonb, started_at=$5, finished_at=$6, updated_at=now() WHERE id=$1 RETURNING *`, [run.id,run.status,run.stepCount,JSON.stringify(run),run.startedAt,run.finishedAt]);
+    if (!rows[0]) fail('AGENT_RUN_NOT_FOUND','Agent run not found.',404);
+    return this.#fromRow(rows[0]);
+  }
+  #fromRow(row) {
+    const state = typeof row.state === 'string' ? JSON.parse(row.state) : row.state;
+    return { ...state, id:row.id, workspaceId:row.workspace_id, status:row.status, stepCount:row.step_count, createdAt:row.created_at?.toISOString?.() ?? row.created_at, updatedAt:row.updated_at?.toISOString?.() ?? row.updated_at, startedAt:row.started_at?.toISOString?.() ?? row.started_at, finishedAt:row.finished_at?.toISOString?.() ?? row.finished_at };
+  }
+}
