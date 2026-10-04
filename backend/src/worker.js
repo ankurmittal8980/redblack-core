@@ -4,6 +4,7 @@ import { pool, transaction, closeDatabase } from './db.js';
 import { communications, calling } from './providers.js';
 import { AIGateway } from './ai-gateway.js';
 import { CommunicationGateway } from './communication-gateway.js';
+import { evaluateAutomationCondition } from './automation-graph.js';
 const communicationGateway = new CommunicationGateway({ db: pool, registry: communications, callingRegistry: calling });
 const aiGateway = new AIGateway({ db: pool });
 
@@ -57,7 +58,7 @@ async function enqueueStageAutomations(client, run, { pipelineId, fromStageId, s
   }
 }
 
-async function executeAction(run, action, position) {
+async function executeAction(run, action, position, nodeId = null) {
   if (!run.lead_id) throw new Error('This action requires a lead-linked automation run.');
   const config = action.config ?? {};
   return transaction(pool, async client => {
@@ -191,6 +192,7 @@ async function executeAction(run, action, position) {
       result = { messageId: sent.message.id, duplicate: sent.duplicate };
     } else throw new Error('Automation action type is not supported.');
 
+    if (nodeId) result = { nodeId, ...result };
     await client.query(
       `UPDATE automation_action_runs SET status='completed', result=$4::jsonb, completed_at=now()
         WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3`,
@@ -200,9 +202,72 @@ async function executeAction(run, action, position) {
   });
 }
 
+async function automationGraphContext(run) {
+  if (!run.lead_id) return { lead: {}, event: run.metadata?.eventData ?? {} };
+  const result = await pool.query('SELECT * FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [run.workspace_id, run.lead_id]);
+  const row = result.rows[0]; if (!row) throw new Error('Automation lead is missing or archived.');
+  const customRows = await pool.query(`SELECT d.field_key,v.value FROM lead_custom_fields v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE d.workspace_id=$1 AND v.lead_id=$2`, [run.workspace_id, run.lead_id]);
+  const custom = Object.fromEntries(customRows.rows.map(item => [item.field_key, item.value]));
+  const lead = { ...row, custom, ownerId: row.owner_user_id, sourceId: row.source_id, score: Number(row.score), budget: row.budget == null ? null : Number(row.budget) };
+  return { lead, custom, event: run.metadata?.eventData ?? {} };
+}
+
+async function recordGraphCondition(run, node, position, context) {
+  return transaction(pool, async client => {
+    await client.query(`INSERT INTO automation_action_runs(workspace_id, automation_run_id, version_id, position, status)
+      VALUES($1,$2,$3,$4,'pending') ON CONFLICT(automation_run_id,position) DO NOTHING`, [run.workspace_id, run.id, run.version_id, position]);
+    const prior = await client.query('SELECT status,result FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3 FOR UPDATE', [run.workspace_id, run.id, position]);
+    if (prior.rows[0]?.status === 'completed') {
+      const value = prior.rows[0].result;
+      return value?.matched === true || value?.branch === 'yes';
+    }
+    const matched = evaluateAutomationCondition(node.condition, context);
+    await client.query(`UPDATE automation_action_runs SET status='completed',result=$4::jsonb,completed_at=now()
+      WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3`,
+      [run.workspace_id, run.id, position, JSON.stringify({ nodeId: node.id, kind: 'condition', matched, branch: matched ? 'yes' : 'no', condition: node.condition })]);
+    return matched;
+  });
+}
+
+async function runGraph(run, graph) {
+  const byId = new Map(graph.nodes.map(node => [node.id, node]));
+  const positions = new Map(graph.nodes.map((node, index) => [node.id, index]));
+  const outgoing = new Map(graph.nodes.map(node => [node.id, graph.edges.filter(edge => edge.from === node.id)]));
+  const context = await automationGraphContext(run);
+  let nodeId = graph.startNodeId;
+  for (let count = 0; count < 100; count += 1) {
+    const node = byId.get(nodeId); if (!node) throw new Error(`Automation graph references missing node ${nodeId}.`);
+    if (node.type === 'end') return;
+    let nextLabel = 'next';
+    if (node.type === 'condition') {
+      const matched = await recordGraphCondition(run, node, positions.get(node.id), context);
+      nextLabel = matched ? 'yes' : 'no';
+    } else {
+      const action = node.type === 'wait' ? { type: 'wait', config: { minutes: node.minutes } } : node.action;
+      try {
+        const outcome = await executeAction(run, action, positions.get(node.id), node.id);
+        if (action.type === 'wait' && !outcome?.skipped) return;
+      } catch (error) {
+        await pool.query(`INSERT INTO automation_action_runs(workspace_id,automation_run_id,version_id,position,status,result)
+          VALUES($1,$2,$3,$4,'failed',$5::jsonb)
+          ON CONFLICT(automation_run_id,position) DO UPDATE SET status='failed',result=EXCLUDED.result,completed_at=now()`,
+          [run.workspace_id, run.id, run.version_id, positions.get(node.id), JSON.stringify({ nodeId: node.id, error: String(error.message).slice(0, 1000) })]);
+        throw error;
+      }
+    }
+    const edge = outgoing.get(nodeId).find(item => item.label === nextLabel);
+    if (!edge) throw new Error(`Automation graph node ${nodeId} has no ${nextLabel} connection.`);
+    nodeId = edge.to;
+  }
+  throw new Error('Automation graph exceeded the 100-step execution limit.');
+}
+
 export async function runOne(run) {
   try {
+    const graph = run.definition?.graph;
     const actions = run.definition?.actions;
+    if (graph) await runGraph(run, graph);
+    else {
     if (!Array.isArray(actions) || actions.length > 25) throw new Error('Automation version has an invalid action list.');
     for (let index = 0; index < actions.length; index += 1) {
       let outcome;
@@ -217,6 +282,7 @@ export async function runOne(run) {
         throw error;
       }
       if (actions[index].type === 'wait' && !outcome?.skipped) return;
+    }
     }
     await pool.query("UPDATE automation_runs SET status='completed', completed_at=now(), error_message=NULL WHERE id=$1 AND status='running'", [run.id]);
   } catch (error) {
