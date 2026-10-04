@@ -33,6 +33,7 @@ CREATE TABLE lead_conversions (
  FOREIGN KEY(workspace_id,opportunity_id) REFERENCES opportunities(workspace_id,id),
  FOREIGN KEY(workspace_id,created_by) REFERENCES workspace_members(workspace_id,user_id)
 );
+ALTER TABLE messages ADD CONSTRAINT messages_workspace_id_key UNIQUE(workspace_id,id);
 CREATE TABLE message_read_states (
  workspace_id uuid NOT NULL, message_id uuid NOT NULL, user_id uuid NOT NULL, read_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(workspace_id,message_id,user_id),
@@ -70,3 +71,4 @@ CREATE TRIGGER tasks_notify AFTER INSERT OR UPDATE ON tasks FOR EACH ROW EXECUTE
 CREATE TRIGGER assignments_notify AFTER INSERT ON lead_assignments FOR EACH ROW EXECUTE FUNCTION crm_notify_event();
 CREATE TRIGGER opportunities_notify AFTER INSERT OR UPDATE ON opportunities FOR EACH ROW EXECUTE FUNCTION crm_notify_event();
 CREATE TRIGGER tickets_notify AFTER INSERT OR UPDATE ON tickets FOR EACH ROW EXECUTE FUNCTION crm_notify_event();
+

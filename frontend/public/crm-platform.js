@@ -22,15 +22,15 @@ export function createCrmPlatformUI({api,workspacePath,setPage,pageHeading,escap
  }
  function payload(form) {return Object.fromEntries(new FormData(form).entries());}
  async function choices() {
-  const paths=['companies','contacts','leads?limit=100','pipelines','members/choices'];
+  const paths=['companies','contacts','leads?limit=100','pipelines','members/choices',''];
   const rows=await Promise.all(paths.map(path=>api(workspacePath(path))));
-  return {companies:rows[0].data,contacts:rows[1].data,leads:rows[2].data,pipelines:rows[3].data,members:rows[4].data};
+  return {companies:rows[0].data,contacts:rows[1].data,leads:rows[2].data,pipelines:rows[3].data,members:rows[4].data,workspace:rows[5]};
  }
  function select(name,value,rows,label,idKey='id',required=false) {
   return `<label>${esc(title(name))}<select name="${name}" ${required?'required':''}><option value="">Select…</option>${rows.map(row=>`<option value="${esc(row[idKey])}" ${String(row[idKey])===String(value)?'selected':''}>${esc(label(row))}</option>`).join('')}</select></label>`;
  }
  function field(entity,key,row,c) {
-  const value=row[keys[key]??key]??(key==='currency'?appState.workspace.currency:'');
+  const value=row[keys[key]??key]??(key==='currency'?c.workspace.currency:'');
   if(['ownerUserId','assigneeUserId'].includes(key))return select(key,value,c.members.filter(m=>appState.role!=='agent'||m.user_id===appState.user.id),r=>r.display_name,'user_id');
   if(key==='companyId')return select(key,value,c.companies,r=>r.name);
   if(key==='contactId')return select(key,row.primary_contact_id??value,c.contacts,cfg.contacts.label);
@@ -115,3 +115,4 @@ export function createCrmPlatformUI({api,workspacePath,setPage,pageHeading,escap
  }
  return {list,detail,conversion,search,notifications,reports,inbox};
 }
+

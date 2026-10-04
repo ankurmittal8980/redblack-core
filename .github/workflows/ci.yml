@@ -39,5 +39,15 @@ jobs:
       - run: pnpm run check
       - run: pnpm audit --prod --audit-level high
       - run: docker build -t redblack-core:ci .
+      - name: Install acceptance browser
+        run: |
+          npm install --prefix /tmp/redblack-browser --no-package-lock playwright@1.58.2
+          /tmp/redblack-browser/node_modules/.bin/playwright install --with-deps chromium
+      - name: CRM browser acceptance (real PostgreSQL/API, desktop and mobile)
+        env:
+          CRM_BROWSER_MODULE: /tmp/redblack-browser/node_modules/playwright/index.mjs
+        run: node --test tests/crm-browser.acceptance.test.js
+
+
 
 
