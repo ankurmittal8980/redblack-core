@@ -11,6 +11,6 @@ test('AI Gateway routes per workspace, rejects unsupported modes, and blocks too
   }});
   const response = await gateway.complete({ workspaceId: 'w1', messages: [{ role: 'user', content: 'hi' }] });
   assert.equal(response.provider, 'anthropic'); assert.deepEqual(calls, ['openai', 'anthropic']);
-  await assert.rejects(() => gateway.complete({ workspaceId: 'w1', messages: [], toolCalls: true }), /failed/);
+  await assert.rejects(() => gateway.complete({ workspaceId: 'w1', messages: [], toolCalls: true }), error => error.code === 'AI_REQUEST_INVALID');
   await assert.rejects(() => providerAdapter('gemini', { env: { GEMINI_API_KEY: 'x' } }).complete({ model: 'm', messages: [], processing: 'flex' }), /not supported/);
 });
