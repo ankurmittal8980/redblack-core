@@ -1,0 +1,28 @@
+export class DeterministicFakePlanner {
+  constructor(decisions = []) { this.decisions = [...decisions]; this.calls = 0; }
+  async next() {
+    this.calls += 1;
+    const value = this.decisions.shift();
+    if (value instanceof Error) throw value;
+    if (typeof value === 'function') return value(this.calls);
+    return value ?? { type:'finish', result:{ done:true }, rationale:'Deterministic completion.' };
+  }
+}
+
+export class DeterministicFakeToolExecutor {
+  constructor({ results = {}, failures = {} } = {}) { this.results = results; this.failures = new Map(Object.entries(failures)); this.calls = []; this.completed = new Map(); }
+  async execute({ request, authorization }) {
+    if (!authorization?.allowed) throw new Error('Executor received a request without server authorization.');
+    this.calls.push(structuredClone(request));
+    if (this.completed.has(request.idempotencyKey)) return structuredClone(this.completed.get(request.idempotencyKey));
+    const remaining = Number(this.failures.get(request.tool) ?? 0);
+    if (remaining > 0) { this.failures.set(request.tool, remaining - 1); throw new Error(`fake failure: ${request.tool}`); }
+    const configured = this.results[request.tool];
+    const result = typeof configured === 'function' ? await configured(request) : (configured ?? { ok:true, output:{ tool:request.tool, input:request.input } });
+    const normalized = { workspaceId:request.workspaceId, tool:request.tool, ...result };
+    this.completed.set(request.idempotencyKey, normalized);
+    return structuredClone(normalized);
+  }
+}
+
+export const allowAllToolAuthorizer = async () => ({ allowed:true, approvalRequired:false, authorizationId:'fake-allow' });
