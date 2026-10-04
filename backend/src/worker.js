@@ -94,7 +94,8 @@ async function executeAction(run, action, position, nodeId = null) {
       await client.query(`INSERT INTO automation_action_runs(workspace_id,automation_run_id,version_id,position,status) VALUES($1,$2,$3,$4,'pending') ON CONFLICT(automation_run_id,position) DO NOTHING`, [run.workspace_id,run.id,run.version_id,position]);
       const prior=await client.query('SELECT status FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3 FOR UPDATE',[run.workspace_id,run.id,position]);
       if(prior.rows[0]?.status==='completed')return { skipped:true,dryRun:true };
-      const result={nodeId,actionType:action.type,dryRun:true,message:'Test run recorded this action without applying changes or contacting a provider.'};
+      const output={actionType:action.type,dryRun:true,message:'Test run recorded this action without applying changes or contacting a provider.'};
+      const result={...(nodeId?{nodeId}:{}),input:{type:action.type,config},output,...output};
       await client.query(`UPDATE automation_action_runs SET status='completed',result=$4::jsonb,completed_at=now() WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3`,[run.workspace_id,run.id,position,JSON.stringify(result)]);
       return { completed:true,skipped:true,dryRun:true };
     });
@@ -107,7 +108,7 @@ async function executeAction(run, action, position, nodeId = null) {
     );
     const prior = await client.query('SELECT status FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3 FOR UPDATE', [run.workspace_id, run.id, position]);
     if (prior.rows[0]?.status === 'completed') return { skipped: true };
-    await client.query("UPDATE automation_action_runs SET status='pending', result='{}'::jsonb WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3", [run.workspace_id, run.id, position]);
+    await client.query("UPDATE automation_action_runs SET status='pending', result=$4::jsonb WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3", [run.workspace_id, run.id, position, JSON.stringify({ ...(nodeId ? { nodeId } : {}), input: { type: action.type, config } })]);
     let result = {};
     if (action.type === 'wait') {
       await client.query("UPDATE automation_runs SET status='queued', resume_at=now()+($2::text || ' minutes')::interval WHERE id=$1", [run.id, String(config.minutes ?? 0)]);
@@ -230,7 +231,8 @@ async function executeAction(run, action, position, nodeId = null) {
       result = { messageId: sent.message.id, duplicate: sent.duplicate };
     } else throw new Error('Automation action type is not supported.');
 
-    if (nodeId) result = { nodeId, ...result };
+    const output = result;
+    result = { ...(nodeId ? { nodeId } : {}), input: { type: action.type, config }, output, ...output };
     await client.query(
       `UPDATE automation_action_runs SET status='completed', result=$4::jsonb, completed_at=now()
         WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3`,
@@ -260,9 +262,10 @@ async function recordGraphCondition(run, node, position, context) {
       return value?.matched === true || value?.branch === 'yes';
     }
     const matched = evaluateAutomationCondition(node.condition, context);
+    const output = { matched, branch: matched ? 'yes' : 'no' };
     await client.query(`UPDATE automation_action_runs SET status='completed',result=$4::jsonb,completed_at=now()
       WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3`,
-      [run.workspace_id, run.id, position, JSON.stringify({ nodeId: node.id, kind: 'condition', matched, branch: matched ? 'yes' : 'no', condition: node.condition })]);
+      [run.workspace_id, run.id, position, JSON.stringify({ nodeId: node.id, kind: 'condition', input: { condition: node.condition }, output, ...output, condition: node.condition })]);
     return matched;
   });
 }
@@ -278,7 +281,16 @@ async function runGraph(run, graph) {
     let nextLabel = 'next';
     if (node.type === 'condition') {
       const context = await automationGraphContext(run);
-      const matched = await recordGraphCondition(run, node, positions.get(node.id), context);
+      let matched;
+      try {
+        matched = await recordGraphCondition(run, node, positions.get(node.id), context);
+      } catch (error) {
+        await pool.query(`INSERT INTO automation_action_runs(workspace_id,automation_run_id,version_id,position,status,result)
+          VALUES($1,$2,$3,$4,'failed',$5::jsonb)
+          ON CONFLICT(automation_run_id,position) DO UPDATE SET status='failed',result=EXCLUDED.result,completed_at=now()`,
+          [run.workspace_id, run.id, run.version_id, positions.get(node.id), JSON.stringify({ nodeId: node.id, input: { condition: node.condition }, error: String(error.message).slice(0, 1000) })]);
+        throw error;
+      }
       nextLabel = matched ? 'yes' : 'no';
     } else {
       const action = node.type === 'wait' ? { type: 'wait', config: { minutes: node.minutes } } : node.action;
@@ -289,7 +301,7 @@ async function runGraph(run, graph) {
         await pool.query(`INSERT INTO automation_action_runs(workspace_id,automation_run_id,version_id,position,status,result)
           VALUES($1,$2,$3,$4,'failed',$5::jsonb)
           ON CONFLICT(automation_run_id,position) DO UPDATE SET status='failed',result=EXCLUDED.result,completed_at=now()`,
-          [run.workspace_id, run.id, run.version_id, positions.get(node.id), JSON.stringify({ nodeId: node.id, error: String(error.message).slice(0, 1000) })]);
+          [run.workspace_id, run.id, run.version_id, positions.get(node.id), JSON.stringify({ nodeId: node.id, input: action.type === 'wait' ? { type: 'wait', config: action.config } : { type: action.type, config: action.config ?? {} }, error: String(error.message).slice(0, 1000) })]);
         throw error;
       }
     }
@@ -315,7 +327,7 @@ export async function runOne(run) {
           `INSERT INTO automation_action_runs(workspace_id, automation_run_id, version_id, position, status, result)
            VALUES($1,$2,$3,$4,'failed',$5::jsonb)
            ON CONFLICT(automation_run_id,position) DO UPDATE SET status='failed', result=EXCLUDED.result, completed_at=now()`,
-          [run.workspace_id, run.id, run.version_id, index, JSON.stringify({ error: String(error.message).slice(0, 1000) })]
+          [run.workspace_id, run.id, run.version_id, index, JSON.stringify({ input: { type: actions[index].type, config: actions[index].config ?? {} }, error: String(error.message).slice(0, 1000) })]
         );
         throw error;
       }

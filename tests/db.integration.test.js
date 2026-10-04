@@ -418,7 +418,11 @@ test('PostgreSQL automation graph branches, journals decisions and resumes waits
     const steps = await db.query('SELECT position,status,result FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 ORDER BY position', [workspaceId, run.rows[0].id]);
     assert.equal(steps.rows.length, 3);
     assert.equal(steps.rows[1].result.branch, 'yes');
+    assert.deepEqual(steps.rows[1].result.input.condition, definition.graph.nodes[1].condition);
+    assert.deepEqual(steps.rows[1].result.output, { matched: true, branch: 'yes' });
     assert.equal(steps.rows[2].result.nodeId, 'yes_note');
+    assert.equal(steps.rows[2].result.input.type, 'create_note');
+    assert.ok(steps.rows[2].result.output.activityId);
     assert.ok(steps.rows.every(row => row.status === 'completed'));
     const state = await db.query('SELECT status FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, run.rows[0].id]);
     assert.equal(state.rows[0].status, 'completed');
