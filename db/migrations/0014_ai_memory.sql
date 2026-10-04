@@ -4,8 +4,8 @@
 CREATE TABLE IF NOT EXISTS ai_memory_records (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  actor_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
-  scope_user_id uuid REFERENCES users(id) ON DELETE CASCADE,
+  actor_user_id uuid,
+  scope_user_id uuid,
   memory_type text NOT NULL CHECK (memory_type IN ('conversation','customer_context','knowledge_reference','agent_execution')),
   durability text NOT NULL CHECK (durability IN ('working','durable')),
   category text NOT NULL CHECK (length(category) BETWEEN 1 AND 80),
@@ -24,6 +24,14 @@ CREATE TABLE IF NOT EXISTS ai_memory_records (
   expires_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ai_memory_actor_workspace_member_fk
+    FOREIGN KEY (workspace_id, actor_user_id)
+    REFERENCES workspace_members(workspace_id, user_id)
+    ON DELETE SET NULL (actor_user_id),
+  CONSTRAINT ai_memory_scope_workspace_member_fk
+    FOREIGN KEY (workspace_id, scope_user_id)
+    REFERENCES workspace_members(workspace_id, user_id)
+    ON DELETE CASCADE,
   CHECK (memory_type <> 'conversation' OR session_id IS NOT NULL),
   CHECK (memory_type <> 'customer_context' OR (entity_type IS NOT NULL AND entity_id IS NOT NULL)),
   CHECK (memory_type <> 'knowledge_reference' OR (reference_type IS NOT NULL AND reference_id IS NOT NULL AND content IS NULL)),
@@ -37,6 +45,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS ai_memory_workspace_idempotency_key
 CREATE INDEX IF NOT EXISTS ai_memory_workspace_user_scope_idx
   ON ai_memory_records(workspace_id, scope_user_id, updated_at DESC)
   WHERE scope_user_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ai_memory_workspace_actor_idx
+  ON ai_memory_records(workspace_id, actor_user_id, memory_type, updated_at DESC)
+  WHERE actor_user_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS ai_memory_workspace_type_updated_idx
   ON ai_memory_records(workspace_id, memory_type, updated_at DESC, id);
