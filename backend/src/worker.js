@@ -35,25 +35,53 @@ export async function claimRun() {
   });
 }
 
-function matchesTrigger(config, event) {
+function matchesTrigger(config, event, context) {
   if (config.pipelineId && config.pipelineId !== event.pipelineId) return false;
   if (config.fromStageId && config.fromStageId !== event.fromStageId) return false;
   if (config.toStageId && config.toStageId !== event.stageId) return false;
-  if (config.status && config.status !== event.status) return false;
+  if (config.status && config.status !== (event.status ?? context.lead?.status)) return false;
+  if (config.all || config.any || (config.field && config.operator)) {
+    return evaluateAutomationCondition(config, context);
+  }
   return true;
 }
 
 async function enqueueStageAutomations(client, run, { pipelineId, fromStageId, stageId }) {
+  const leadResult = await client.query(
+    'SELECT * FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL',
+    [run.workspace_id, run.lead_id]
+  );
+  const row = leadResult.rows[0];
+  if (!row) return;
+  const customRows = await client.query(
+    `SELECT d.field_key,v.value FROM lead_custom_fields v
+       JOIN custom_field_definitions d ON d.id=v.field_definition_id
+      WHERE d.workspace_id=$1 AND v.lead_id=$2`,
+    [run.workspace_id, run.lead_id]
+  );
+  const custom = Object.fromEntries(customRows.rows.map(item => [item.field_key, item.value]));
+  const lead = {
+    ...row,
+    custom,
+    ownerId: row.owner_user_id,
+    sourceId: row.source_id,
+    opportunityType: row.opportunity_type,
+    brandProject: row.brand_project,
+    score: Number(row.score),
+    budget: row.budget == null ? null : Number(row.budget)
+  };
+  const event = { pipelineId, fromStageId, stageId, toStageId: stageId, status: row.status };
+  const context = { ...lead, ...event, lead, event };
   const candidates = await client.query(
     `SELECT id, current_version_id, trigger_config FROM automations
       WHERE workspace_id=$1 AND active=true AND trigger_type='lead.stage_changed'`, [run.workspace_id]
   );
   for (const item of candidates.rows) {
-    if (!matchesTrigger(item.trigger_config ?? {}, { pipelineId, fromStageId, stageId })) continue;
+    if (!matchesTrigger(item.trigger_config ?? {}, event, context)) continue;
     await client.query(
       `INSERT INTO automation_runs(workspace_id, automation_id, version_id, lead_id, status, idempotency_key, metadata)
        VALUES($1,$2,$3,$4,'queued',$5,$6::jsonb) ON CONFLICT(automation_id,idempotency_key) DO NOTHING`,
-      [run.workspace_id, item.id, item.current_version_id, run.lead_id, `event:automation-stage:${run.id}:${stageId}`, JSON.stringify({ requestedBy: null, sourceRunId: run.id, eventData: { pipelineId, fromStageId, stageId } })]
+      [run.workspace_id, item.id, item.current_version_id, run.lead_id, `event:automation-stage:${run.id}:${stageId}`, JSON.stringify({ requestedBy: null, sourceRunId: run.id, eventData: event })]
     );
   }
 }

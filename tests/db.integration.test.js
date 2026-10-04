@@ -486,3 +486,85 @@ test('PostgreSQL automation retries are bounded by failures, not wait resumes', 
     await db.end();
   }
 });
+
+
+test('PostgreSQL stage-change dispatch enforces nested trigger conditions using workspace lead context', { skip: !databaseUrl }, async () => {
+  process.env.DATABASE_URL = databaseUrl;
+  process.env.APP_ENV = 'test';
+  const [{ Pool }, { applyMigrations }, { normalizeAutomation }, worker] = await Promise.all([
+    import('pg'), import('../backend/src/migrate.js'), import('../backend/src/server.js'), import('../backend/src/worker.js')
+  ]);
+  const db = new Pool({ connectionString: databaseUrl });
+  const token = randomUUID();
+  try {
+    await applyMigrations(db);
+    const workspace = await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', [`Stage Trigger ${token.slice(0,8)}`, `stage-trigger-${token}`]);
+    const workspaceId = workspace.rows[0].id;
+    const user = await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`stage-trigger-${token}@example.test`, 'Stage Trigger Test']);
+    await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, user.rows[0].id]);
+    const lead = await db.query("INSERT INTO leads(workspace_id,first_name,status,score) VALUES($1,'Stage Trigger','Open',86) RETURNING id", [workspaceId]);
+    const pipeline = await db.query("INSERT INTO pipelines(workspace_id,name,slug) VALUES($1,'Trigger Pipeline',$2) RETURNING id", [workspaceId, `trigger-${token}`]);
+    const firstStage = await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'New','new',1) RETURNING id", [pipeline.rows[0].id]);
+    const targetStage = await db.query("INSERT INTO pipeline_stages(pipeline_id,name,slug,position) VALUES($1,'Qualified','qualified',2) RETURNING id", [pipeline.rows[0].id]);
+    await db.query('INSERT INTO lead_pipeline_entries(workspace_id,lead_id,pipeline_id,current_stage_id,is_current) VALUES($1,$2,$3,$4,true)', [workspaceId, lead.rows[0].id, pipeline.rows[0].id, firstStage.rows[0].id]);
+
+    async function install(definition) {
+      const automation = await db.query(
+        "INSERT INTO automations(workspace_id,name,active,trigger_type,trigger_config,created_by) VALUES($1,$2,false,$3,$4::jsonb,$5) RETURNING id",
+        [workspaceId, definition.name, definition.triggerType, JSON.stringify(definition.triggerConfig), user.rows[0].id]
+      );
+      const version = await db.query(
+        'INSERT INTO automation_versions(workspace_id,automation_id,version_number,definition,created_by) VALUES($1,$2,1,$3::jsonb,$4) RETURNING id',
+        [workspaceId, automation.rows[0].id, JSON.stringify(definition), user.rows[0].id]
+      );
+      await db.query('UPDATE automations SET current_version_id=$3,active=true WHERE workspace_id=$1 AND id=$2', [workspaceId, automation.rows[0].id, version.rows[0].id]);
+      return { id: automation.rows[0].id, versionId: version.rows[0].id };
+    }
+
+    const parentDefinition = normalizeAutomation({
+      name: 'Move to qualified', triggerType: 'manual', triggerConfig: {},
+      actions: [{ type: 'change_stage', config: { pipelineId: pipeline.rows[0].id, stageId: targetStage.rows[0].id } }]
+    });
+    const parent = await install(parentDefinition);
+    const matchingDefinition = normalizeAutomation({
+      name: 'Nested matching stage trigger', triggerType: 'lead.stage_changed',
+      triggerConfig: { all: [
+        { field: 'lead.score', operator: '>=', value: 80 },
+        { any: [
+          { field: 'event.stageId', operator: '=', value: targetStage.rows[0].id },
+          { field: 'event.stageId', operator: '=', value: firstStage.rows[0].id }
+        ] }
+      ] },
+      actions: [{ type: 'create_note', config: { title: 'Nested trigger matched', body: 'Stage and lead conditions passed.' } }]
+    });
+    const nonMatchingDefinition = normalizeAutomation({
+      name: 'Nested nonmatching stage trigger', triggerType: 'lead.stage_changed',
+      triggerConfig: { all: [{ field: 'lead.score', operator: '>=', value: 95 }] },
+      actions: [{ type: 'create_note', config: { title: 'Nested trigger should not run', body: 'Score condition failed.' } }]
+    });
+    const matching = await install(matchingDefinition);
+    const nonMatching = await install(nonMatchingDefinition);
+    const parentRun = await db.query(
+      "INSERT INTO automation_runs(workspace_id,automation_id,version_id,lead_id,status,idempotency_key,metadata) VALUES($1,$2,$3,$4,'running',$5,$6::jsonb) RETURNING *",
+      [workspaceId, parent.id, parent.versionId, lead.rows[0].id, `stage-parent:${token}`, JSON.stringify({ requestedBy: user.rows[0].id })]
+    );
+    await worker.runOne({ ...parentRun.rows[0], definition: parentDefinition });
+
+    const queued = await db.query(
+      'SELECT automation_id,metadata FROM automation_runs WHERE workspace_id=$1 AND automation_id=ANY($2::uuid[])',
+      [workspaceId, [matching.id, nonMatching.id]]
+    );
+    assert.deepEqual(queued.rows.map(row => row.automation_id), [matching.id]);
+    assert.deepEqual(queued.rows[0].metadata.eventData, {
+      pipelineId: pipeline.rows[0].id,
+      fromStageId: firstStage.rows[0].id,
+      stageId: targetStage.rows[0].id,
+      toStageId: targetStage.rows[0].id,
+      status: 'Qualified'
+    });
+    const changed = await db.query('SELECT current_stage_id FROM lead_pipeline_entries WHERE workspace_id=$1 AND lead_id=$2 AND is_current=true', [workspaceId, lead.rows[0].id]);
+    assert.equal(changed.rows[0].current_stage_id, targetStage.rows[0].id);
+  } finally {
+    await db.end();
+  }
+});
