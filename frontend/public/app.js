@@ -355,7 +355,7 @@ async function renderCalling() {
     <section class="panel"><div class="panel-header"><h2 class="panel-title">Call history</h2></div><div class="table-wrap"><table><thead><tr><th>Direction</th><th>Provider</th><th>Status</th><th>Started</th><th>Duration</th><th>Disposition</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
 }
 
-const automationActionTypes = ['create_task','create_activity','change_stage','create_message_draft','wait','update_lead','assign_owner','create_note','invoke_ai','schedule_follow_up','send_communication','start_call'];
+
 
 function automationDefaultConfig(type) {
   if (type === 'create_task') return { title: 'Follow up', dueInMinutes: 60, assignTo: 'owner' };
@@ -368,41 +368,159 @@ function automationDefaultConfig(type) {
   return {};
 }
 
-function renderAutomationSteps() {
-  const root = $('#automationSteps'); if (!root) return;
-  root.innerHTML = (appState.automationSteps ?? []).map((step, index) => `<article class="pipeline-card" draggable="true" data-automation-step="${index}"><div class="panel-header"><div><span class="badge">STEP ${index + 1}</span> <strong>${escapeHtml(step.type)}</strong></div><button type="button" class="text-button" data-action="remove-automation-step" data-index="${index}">Remove</button></div><label>Configuration JSON<textarea data-step-config="${index}" rows="4">${escapeHtml(JSON.stringify(step.config, null, 2))}</textarea></label></article>`).join('') || '<div class="empty-state">Add at least one action from the palette.</div>';
-  root.querySelectorAll('[data-automation-step]').forEach(card => card.addEventListener('dragstart', event => event.dataTransfer.setData('text/plain', card.dataset.automationStep)));
-  root.addEventListener('dragover', event => event.preventDefault());
-  root.addEventListener('drop', event => {
-    event.preventDefault(); const from = Number(event.dataTransfer.getData('text/plain')); const target = event.target.closest('[data-automation-step]'); if (!Number.isInteger(from) || !target) return;
-    const to = Number(target.dataset.automationStep); if (from === to) return;
-    const [moved] = appState.automationSteps.splice(from, 1); appState.automationSteps.splice(to, 0, moved); renderAutomationSteps();
-  }, { once: true });
+const automationActionTypes = ['create_task','create_activity','change_stage','create_message_draft','update_lead','assign_owner','create_note','invoke_ai','schedule_follow_up','send_communication','start_call'];
+const automationFields = ['lead.score','lead.status','lead.temperature','lead.budget','lead.location','lead.email','lead.phone','lead.owner_user_id','event.pipelineId','event.fromStageId','event.stageId','event.status','event.channel','event.provider','event.subject','event.direction','event.durationSeconds','event.messageId','event.callId','event.objectType'];
+const automationOperators = ['=','!=','>','>=','<','<=','contains','does not contain','is empty','is not empty','in','not in'];
+
+function automationDefaultConfig(type) {
+  if (type === 'create_task') return { title: 'Follow up', dueInMinutes: 60, assignTo: 'owner' };
+  if (type === 'create_activity' || type === 'create_note') return { title: 'Automation activity', body: '' };
+  if (type === 'wait') return { minutes: 60 };
+  if (type === 'schedule_follow_up') return { title: 'Follow up', dueInMinutes: 60 };
+  if (type === 'create_message_draft') return { channel: 'whatsapp', body: '' };
+  if (type === 'send_communication') return { channel: 'whatsapp', provider: '', to: '', body: '' };
+  if (type === 'invoke_ai') return { prompt: '', processing: 'standard' };
+  if (type === 'start_call') return { provider: '', direction: 'outbound', to: '' };
+  if (type === 'update_lead') return { status: 'Qualified' };
+  if (type === 'change_stage') return { pipelineId: '', stageId: '' };
+  if (type === 'assign_owner') return { userId: '' };
+  return {};
 }
+
+function newAutomationGraph() {
+  const action = { id: 'action_start', label: 'Create follow-up task', type: 'action', action: { type: 'create_task', config: automationDefaultConfig('create_task') } };
+  return { version: 1, startNodeId: action.id, nodes: [action, { id: 'end', label: 'Complete', type: 'end' }], edges: [{ from: action.id, to: 'end', label: 'next' }] };
+}
+function ensureAutomationGraph() { if (!appState.automationGraph) appState.automationGraph = newAutomationGraph(); return appState.automationGraph; }
+function graphNode(id) { return ensureAutomationGraph().nodes.find(node => node.id === id); }
+function graphPathExists(from, target, ignoredFrom, ignoredLabel) {
+  const edges = ensureAutomationGraph().edges.filter(edge => !(edge.from === ignoredFrom && edge.label === ignoredLabel));
+  const seen = new Set(); const visit = id => { if (id === target) return true; if (seen.has(id)) return false; seen.add(id); return edges.some(edge => edge.from === id && visit(edge.to)); };
+  return visit(from);
+}
+function graphTargetSelect(node, label) {
+  const graph = ensureAutomationGraph(); const current = graph.edges.find(edge => edge.from === node.id && edge.label === label);
+  const choices = graph.nodes.filter(item => item.id !== node.id && (!graphPathExists(item.id, node.id, node.id, label) || item.id === current?.to));
+  return `<label class="workflow-connection">${label === 'yes' ? 'YES →' : label === 'no' ? 'NO →' : 'Next →'}<select data-graph-connection data-node-id="${escapeHtml(node.id)}" data-label="${label}" aria-label="${label} connection">${choices.map(item => `<option value="${escapeHtml(item.id)}" ${current?.to === item.id ? 'selected' : ''}>${escapeHtml(item.label || (item.type === 'end' ? 'End' : item.id))}</option>`).join('')}</select></label>`;
+}
+function renderConditionTree(nodeId, condition, path = 'condition') {
+  if (condition?.all || condition?.any) {
+    const groupKey = condition.all ? 'all' : 'any'; const children = condition[groupKey] ?? [];
+    return `<div class="workflow-condition-group"><div class="inline-form"><label>Match<select data-condition-group data-node-id="${escapeHtml(nodeId)}" data-condition-path="${path}"><option value="all" ${groupKey==='all'?'selected':''}>ALL conditions (AND)</option><option value="any" ${groupKey==='any'?'selected':''}>ANY condition (OR)</option></select></label><button type="button" class="quiet-button" data-action="add-condition-rule" data-node-id="${escapeHtml(nodeId)}" data-condition-path="${path}">+ Rule</button><button type="button" class="quiet-button" data-action="add-condition-group" data-node-id="${escapeHtml(nodeId)}" data-condition-path="${path}">+ Group</button>${path==='condition'?'':`<button type="button" class="quiet-button" data-action="remove-condition-group" data-node-id="${escapeHtml(nodeId)}" data-condition-path="${path}">Remove group</button>`}</div>${children.map((child,index)=>renderConditionTree(nodeId,child,`${path}.${groupKey}.${index}`)).join('')}</div>`;
+  }
+  const field=condition?.field??'lead.score', operator=condition?.operator??'>=';
+  const value=Array.isArray(condition?.value)?condition.value.join(', '):(condition?.value??'');
+  return `<div class="workflow-condition-rule"><select data-condition-key="field" data-node-id="${escapeHtml(nodeId)}" data-condition-path="${path}">${automationFields.concat((appState.automationCustomFields??[]).map(field=>`lead.custom.${field.field_key}`)).map(item=>`<option ${item===field?'selected':''}>${item}</option>`).join('')}</select><select data-condition-key="operator" data-node-id="${escapeHtml(nodeId)}" data-condition-path="${path}">${automationOperators.map(item=>`<option ${item===operator?'selected':''}>${item}</option>`).join('')}</select><input data-condition-key="value" data-node-id="${escapeHtml(nodeId)}" data-condition-path="${path}" value="${escapeHtml(value)}" aria-label="Comparison value" placeholder="Comma-separated for in / not in"><button type="button" class="quiet-button" data-action="remove-condition" data-node-id="${escapeHtml(nodeId)}" data-condition-path="${path}" aria-label="Remove condition">Remove</button></div>`;
+}
+function automationConfigField(node,key,label,kind='text') {
+  const config=node.action.config??{}; const value=config[key]??'';
+  if (kind==='owner') return `<label>${label}<select data-automation-config data-node-id="${escapeHtml(node.id)}" data-key="${key}"><option value="">Use lead owner / default</option>${(appState.automationMembers??[]).map(member=>`<option value="${escapeHtml(member.user_id)}" ${value===member.user_id?'selected':''}>${escapeHtml(member.display_name||member.email)}</option>`).join('')}</select></label>`;
+  if (kind==='pipeline') return `<label>${label}<select data-automation-config data-node-id="${escapeHtml(node.id)}" data-key="pipelineId"><option value="">Choose pipeline</option>${(appState.automationPipelines??[]).map(p=>`<option value="${escapeHtml(p.id)}" ${config.pipelineId===p.id?'selected':''}>${escapeHtml(p.name)}</option>`).join('')}</select></label><label>Stage<select data-automation-config data-node-id="${escapeHtml(node.id)}" data-key="stageId"><option value="">Choose stage</option>${(appState.automationPipelines??[]).flatMap(p=>(p.stages??[]).map(s=>`<option value="${escapeHtml(s.id)}" ${config.stageId===s.id?'selected':''}>${escapeHtml(p.name)} · ${escapeHtml(s.name)}</option>`)).join('')}</select></label>`;
+  if (kind==='select') {
+    const options=key==='channel'?['email','whatsapp','rcs']:key==='assignTo'?['owner','current']:key==='direction'?['inbound','outbound']:key==='temperature'?['hot','warm','cold']:key==='processing'?['standard']:[];
+    return `<label>${label}<select data-automation-config data-node-id="${escapeHtml(node.id)}" data-key="${key}">${options.map(item=>`<option value="${item}" ${value===item?'selected':''}>${item}</option>`).join('')}</select></label>`;
+  }
+  const tag=kind==='textarea'?'textarea':'input'; const attrs=kind==='number'?'type="number" min="0" step="1"':'type="text"';
+  return kind==='textarea' ? `<label class="span-2">${label}<textarea data-automation-config data-node-id="${escapeHtml(node.id)}" data-key="${key}" maxlength="10000">${escapeHtml(value)}</textarea></label>` : `<label>${label}<${tag} ${attrs} data-automation-config data-node-id="${escapeHtml(node.id)}" data-key="${key}" value="${escapeHtml(value)}"></label>`;
+}
+function renderAutomationActionConfig(node) {
+  const type=node.action.type; const fields={
+    create_task:[['title','Task title'],['description','Task notes','textarea'],['dueInMinutes','Due in minutes','number'],['assignTo','Assign to','select']],
+    create_activity:[['title','Activity title'],['body','Activity details','textarea']],
+    create_note:[['title','Note title'],['body','Note','textarea']],
+    schedule_follow_up:[['title','Follow-up title'],['dueInMinutes','Due in minutes','number']],
+    create_message_draft:[['channel','Channel','select'],['subject','Subject'],['body','Message','textarea']],
+    send_communication:[['channel','Channel','select'],['provider','Configured provider name'],['to','Destination'],['subject','Subject'],['body','Message','textarea']],
+    invoke_ai:[['prompt','AI instruction','textarea'],['model','Model override (optional)'],['processing','Processing mode','select']],
+    start_call:[['provider','Configured calling provider'],['direction','Direction','select'],['to','Phone number']],
+    change_stage:[['pipelineId','Pipeline','pipeline']],
+    assign_owner:[['userId','Owner','owner']],
+    update_lead:[['status','Set status'],['temperature','Set temperature','select'],['score','Set score','number'],['nextAction','Next action'],['notes','Add/replace notes','textarea']]
+  }[type]??[];
+  return `<div class="field-grid">${fields.map(([key,label,kind='text'])=>automationConfigField(node,key,label,kind)).join('')}</div>`;
+}
+function renderAutomationGraph() {
+  const root=$('#automationSteps'); if(!root)return; const graph=ensureAutomationGraph();
+  root.innerHTML=`<div class="workflow-canvas" aria-label="Automation workflow graph">${graph.nodes.map((node,index)=>`<article class="pipeline-card workflow-node" draggable="true" data-automation-node="${escapeHtml(node.id)}"><div class="panel-header"><div><span class="badge">${node.type==='end'?'END':node.type==='condition'?'BRANCH':node.type==='wait'?'WAIT':'ACTION'}</span> <strong>${escapeHtml(node.label||node.id)}</strong></div>${node.type==='end'?'':`<button type="button" class="text-button" data-action="remove-automation-node" data-node-id="${escapeHtml(node.id)}">Remove</button>`}</div>${node.type==='end'?'':`<label>Step name<input data-node-label data-node-id="${escapeHtml(node.id)}" value="${escapeHtml(node.label||'')}" maxlength="80"></label>`}${node.type==='condition'?renderConditionTree(node.id,node.condition):node.type==='action'?`<label>Action<select data-automation-action-type data-node-id="${escapeHtml(node.id)}">${automationActionTypes.map(type=>`<option value="${type}" ${node.action.type===type?'selected':''}>${escapeHtml(type.replaceAll('_',' '))}</option>`).join('')}</select></label>${renderAutomationActionConfig(node)}`:node.type==='wait'?automationConfigField({id:node.id,action:{config:{minutes:node.minutes}}},'minutes','Wait minutes','number'):''}${node.type==='condition'?graphTargetSelect(node,'yes')+graphTargetSelect(node,'no'):node.type==='end'?'':graphTargetSelect(node,'next')}</article>`).join('<div class="workflow-edge" aria-hidden="true">↓</div>')}</div>`;
+  root.ondragstart=event=>{const card=event.target.closest('[data-automation-node]');if(card)event.dataTransfer.setData('text/plain',card.dataset.automationNode);};
+  root.ondragover=event=>event.preventDefault();
+  root.ondrop=event=>{ event.preventDefault(); const from=event.dataTransfer.getData('text/plain'); const target=event.target.closest('[data-automation-node]'); if(!from||!target||from===target.dataset.automationNode)return; const nodes=graph.nodes.filter(node=>node.type!=='end'); const moving=nodes.findIndex(node=>node.id===from),to=nodes.findIndex(node=>node.id===target.dataset.automationNode); if(moving<0||to<0)return; const [node]=nodes.splice(moving,1); nodes.splice(to,0,node); graph.nodes=[...nodes,graph.nodes.find(node=>node.type==='end')]; renderAutomationGraph(); };
+}
+function addAutomationNode(type) {
+  const graph=ensureAutomationGraph();
+  if (graph.nodes.length >= 50) { showToast('This workflow already has the 50-node maximum.', 'error'); return; }
+  if (type !== 'condition' && graph.nodes.filter(node=>node.type==='action'||node.type==='wait').length >= 25) { showToast('This workflow already has the 25-action maximum.', 'error'); return; }
+  const end=graph.nodes.find(node=>node.type==='end'); const id=`${type}_${crypto.randomUUID().slice(0,8)}`;
+  const node=type==='condition'?{id,label:'Condition',type,condition:{all:[{field:'lead.score',operator:'>=',value:70}]}}:type==='wait'?{id,label:'Wait',type,minutes:60}:{id,label:type.replaceAll('_',' '),type:'action',action:{type,config:automationDefaultConfig(type)}};
+  graph.edges.forEach(edge=>{if(edge.to===end.id)edge.to=id;});
+  graph.nodes.splice(graph.nodes.indexOf(end),0,node);
+  if(type==='condition') graph.edges.push({from:id,to:end.id,label:'yes'},{from:id,to:end.id,label:'no'});
+  else graph.edges.push({from:id,to:end.id,label:'next'});
+  renderAutomationGraph();
+}
+function removeAutomationNode(id) {
+  const graph=ensureAutomationGraph(),node=graph.nodes.find(item=>item.id===id); if(!node||node.type==='end'||graph.nodes.length<=2)return;
+  const out=graph.edges.filter(edge=>edge.from===id); const target=node.type==='condition'?out.find(edge=>edge.label==='yes')?.to:out.find(edge=>edge.label==='next')?.to;
+  if(!target)return;
+  if(graph.startNodeId===id)graph.startNodeId=target;
+  graph.edges=graph.edges.flatMap(edge=>edge.to===id?[{...edge,to:target}]:edge.from===id?[]:[edge]);
+  graph.nodes=graph.nodes.filter(item=>item.id!==id);
+  const reachable=new Set(); const visit=current=>{if(reachable.has(current))return;reachable.add(current);graph.edges.filter(edge=>edge.from===current).forEach(edge=>visit(edge.to));};visit(graph.startNodeId);
+  graph.nodes=graph.nodes.filter(item=>reachable.has(item.id)); graph.edges=graph.edges.filter(edge=>reachable.has(edge.from)&&reachable.has(edge.to));
+  renderAutomationGraph();
+}
+function updateGraphConnection(select) {
+  const graph=ensureAutomationGraph(),{nodeId,label}=select.dataset;
+  graph.edges=graph.edges.filter(edge=>!(edge.from===nodeId&&edge.label===label));
+  graph.edges.push({from:nodeId,to:select.value,label});
+}
+function conditionPathParts(path) { const parts=String(path||'').split('.').filter(Boolean); if(parts[0]==='condition')parts.shift(); return parts; }
+function getConditionAt(node,path) { return conditionPathParts(path).reduce((value,key)=>/^\d+$/.test(key)?value?.[Number(key)]:value?.[key],node.condition); }
+function setConditionAt(node,path,value) { const parts=conditionPathParts(path); const last=parts.pop(); const parent=parts.reduce((item,key)=>/^\d+$/.test(key)?item[Number(key)]:item[key],node.condition); if(/^\d+$/.test(last))parent[Number(last)]=value;else parent[last]=value; }
+function handleConditionControl(control) {
+  const node=graphNode(control.dataset.nodeId); if(!node)return; const {conditionPath,key}=control.dataset;
+  if(control.matches('[data-condition-group]')) { const group=getConditionAt(node,conditionPath); const children=group.all??group.any??[]; delete group.all;delete group.any;group[control.value]=children;renderAutomationGraph();return; }
+  const rule=getConditionAt(node,conditionPath);
+  if(key==='value') { if(control.value==='')delete rule.value; else if(['in','not in'].includes(rule.operator))rule.value=control.value.split(',').map(value=>value.trim()).filter(Boolean);else if(control.value==='true'||control.value==='false')rule.value=control.value==='true';else if(control.value.trim()!==''&&Number.isFinite(Number(control.value)))rule.value=Number(control.value);else rule.value=control.value; }
+  else rule[key]=key==='operator'?control.value.toLowerCase():control.value;
+}
+function addConditionChild(nodeId,path,nested) { const node=graphNode(nodeId),group=getConditionAt(node,path); const key=group.all?'all':'any'; group[key].push(nested?{any:[{field:'lead.status',operator:'=','value':'Connected'}]}:{field:'lead.status',operator:'=','value':'Connected'});renderAutomationGraph(); }
+function removeConditionChild(nodeId,path) { const node=graphNode(nodeId),parts=conditionPathParts(path),index=Number(parts.pop()),groupKey=parts.pop(),group=getConditionAt(node,parts.join('.')); if(group?.[groupKey]?.length>1){group[groupKey].splice(index,1);renderAutomationGraph();} }
+function removeConditionGroup(nodeId,path) { const node=graphNode(nodeId),parts=conditionPathParts(path),index=Number(parts.pop()),groupKey=parts.pop(),parent=getConditionAt(node,parts.join('.')); if(parent?.[groupKey]?.length>1){parent[groupKey].splice(index,1);renderAutomationGraph();} }
 
 async function loadAutomationEditor(automationId, clone = false) {
   const item=await api(`${workspacePath(`automations/${encodeURIComponent(automationId)}`)}`); const definition=item.definition??{};
-  appState.automationEditingId=clone?null:automationId; appState.automationSteps=(definition.actions??[]).map(step=>({type:step.type,config:step.config??{}}));
+  appState.automationEditingId=clone?null:automationId;
+  appState.automationTriggerConfig=definition.triggerConfig??item.trigger_config??{};
+  if (definition.graph) appState.automationGraph=JSON.parse(JSON.stringify(definition.graph));
+  else {
+    const nodes=(definition.actions??[]).map((step,index)=>({id:`step_${index}`,type:step.type==='wait'?'wait':'action',...(step.type==='wait'?{minutes:step.config?.minutes??1}:{action:{type:step.type,config:step.config??{}}})}));
+    if(!nodes.length)nodes.push({id:'action_start',type:'action',action:{type:'create_task',config:automationDefaultConfig('create_task')}});
+    const end={id:'end',label:'Complete',type:'end'}; const edges=[];
+    nodes.forEach((node,index)=>{const target=nodes[index+1]?.id??end.id;edges.push({from:node.id,to:target,label:node.type==='condition'?'yes':'next'});if(node.type==='condition')edges.push({from:node.id,to:target,label:'no'});});
+    appState.automationGraph={version:1,startNodeId:nodes[0].id,nodes:[...nodes,end],edges};
+  }
   $('#automationFormPanel')?.classList.remove('hidden'); const form=$('#automationForm'); if(!form)return;
   form.elements.name.value=clone?`${definition.name||item.name} copy`:(definition.name||item.name||'');
   form.elements.description.value=definition.description||item.description||''; form.elements.triggerType.value=definition.triggerType||item.trigger_type||'manual';
-  form.elements.conditions.value=JSON.stringify(definition.triggerConfig??item.trigger_config??{},null,2); form.elements.active.checked=clone?false:Boolean(item.active); renderAutomationSteps();
+  form.elements.active.checked=clone?false:Boolean(item.active); renderAutomationGraph();
 }
 
 async function renderAutomations() {
-  const result = await api(`${workspacePath('automations')}`);
+  const [result,pipelines,members,customFields] = await Promise.all([api(`${workspacePath('automations')}`),api(workspacePath('pipelines')),api(workspacePath('members/choices')),api(`${workspacePath('custom-fields')}?entityType=lead`)]);
+  appState.automationPipelines=pipelines.data??[]; appState.automationMembers=members.data??[]; appState.automationCustomFields=customFields.data??[];
   const canManage = ['owner','admin','manager'].includes(appState.role);
-  if (!Array.isArray(appState.automationSteps) || !appState.automationSteps.length) appState.automationSteps = [{ type: 'create_task', config: automationDefaultConfig('create_task') }];
-  const rows = (result.data ?? []).map(item => `<tr><td><div class="lead-name">${escapeHtml(item.name)}</div><div class="lead-sub">v${escapeHtml(item.current_version_id?.slice(0,8) || '—')} · ${escapeHtml(item.description || '')}</div></td><td>${badge(item.trigger_type)}</td><td>${badge(item.active ? 'active' : 'inactive')}</td><td><button class="quiet-button" data-action="edit-automation" data-id="${escapeHtml(item.id)}">Edit</button> <button class="quiet-button" data-action="clone-automation" data-id="${escapeHtml(item.id)}">Clone</button> <button class="quiet-button" data-action="test-automation" data-id="${escapeHtml(item.id)}">Test</button> <button class="quiet-button" data-action="run-automation" data-id="${escapeHtml(item.id)}">Queue run</button> <button class="quiet-button" data-action="automation-runs" data-id="${escapeHtml(item.id)}">Run history</button></td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Add a workflow to automate sales work.</td></tr>';
-  setPage(`${pageHeading('WORKFLOW ENGINE', 'Automations', 'Build versioned workflows visually; drag actions to reorder execution.', canManage ? '<button class="button button-primary" data-action="toggle-automation-form">+ New automation</button>' : '')}
+  if (!appState.automationGraph) appState.automationGraph = newAutomationGraph();
+  const rows = (result.data ?? []).map(item => `<tr><td><div class="lead-name">${escapeHtml(item.name)}</div><div class="lead-sub">v${escapeHtml(item.current_version_id?.slice(0,8) || '—')} · ${escapeHtml(item.description || '')}</div></td><td>${badge(item.trigger_type)}</td><td>${badge(item.active ? 'active' : 'inactive')}</td><td>${canManage ? `<button class="quiet-button" data-action="edit-automation" data-id="${escapeHtml(item.id)}">Edit</button> <button class="quiet-button" data-action="clone-automation" data-id="${escapeHtml(item.id)}">Clone</button> <button class="quiet-button" data-action="test-automation" data-id="${escapeHtml(item.id)}">Test</button> <button class="quiet-button" data-action="run-automation" data-id="${escapeHtml(item.id)}">Queue run</button> <button class="quiet-button" data-action="automation-runs" data-id="${escapeHtml(item.id)}">Run history</button>` : '—'}</td></tr>`).join('') || '<tr><td colspan="4" class="empty-state">Add a workflow to automate sales work.</td></tr>';
+  setPage(`${pageHeading('WORKFLOW ENGINE', 'Automations', 'Build versioned workflows with connected condition branches, actions and waits.', canManage ? '<button class="button button-primary" data-action="toggle-automation-form">+ New automation</button>' : '')}
     <div class="notice">Published workflow definitions are versioned. Provider-backed actions remain behind consent, configuration and idempotency controls.</div>
-    <section id="automationFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Visual automation builder</h2><button class="text-button" data-action="toggle-automation-form">Close</button></div><form id="automationForm" class="panel-body"><div class="field-grid"><label>Name<input name="name" required maxlength="160"></label><label>Trigger<select name="triggerType"><option>manual</option><option>lead.created</option><option>lead.updated</option><option>form.submitted</option><option>lead.stage_changed</option><option>message.incoming</option><option>email.incoming</option><option>appointment.created</option><option>appointment.missed</option><option>task.completed</option><option>meeting.created</option><option>meeting.missed</option><option>call.completed</option><option>call.ended</option><option>lead.no_response</option><option>lead.score_changed</option><option>scheduled.time</option><option>webhook.received</option><option>ai.decision</option></select></label><label class="span-2">Description<input name="description" maxlength="500"></label><label class="span-2">Trigger / condition JSON<textarea name="conditions" placeholder='{"all":[{"field":"score","operator":">=","value":70}]}'></textarea></label></div>
-      <div class="panel-header"><div><h3 class="panel-title">Action palette</h3><p class="panel-subtitle">Add actions, then drag cards to change execution order.</p></div></div><div class="heading-actions">${automationActionTypes.map(type => `<button type="button" class="button button-secondary button-small" data-action="add-automation-step" data-type="${type}">+${escapeHtml(type.replaceAll('_',' '))}</button>`).join('')}</div>
+    <section id="automationFormPanel" class="panel hidden"><div class="panel-header"><h2 class="panel-title">Visual automation builder</h2><button class="text-button" data-action="toggle-automation-form">Close</button></div><form id="automationForm" class="panel-body"><div class="field-grid"><label>Name<input name="name" required maxlength="160"></label><label>Trigger<select name="triggerType"><option>manual</option><option>lead.created</option><option>lead.updated</option><option>lead.stage_changed</option><option>message.incoming</option><option>email.incoming</option><option>appointment.created</option><option>appointment.missed</option><option>task.completed</option><option>meeting.created</option><option>meeting.missed</option><option>call.completed</option><option>call.ended</option><option>lead.no_response</option><option>lead.score_changed</option><option>webhook.received</option></select></label><label class="span-2">Description<input name="description" maxlength="500"></label><p class="span-2 muted">Add condition nodes to configure ALL/ANY rules and YES/NO paths. Connections are saved with this workflow version.</p></div>
+      <div class="panel-header"><div><h3 class="panel-title">Action palette</h3><p class="panel-subtitle">Add actions, conditions and waits, then connect each path.</p></div></div><div class="heading-actions">${automationActionTypes.map(type => `<button type="button" class="button button-secondary button-small" data-action="add-automation-step" data-type="${type}">+${escapeHtml(type.replaceAll('_',' '))}</button>`).join('')}<button type="button" class="button button-secondary button-small" data-action="add-automation-node" data-type="condition">+ Condition / branch</button><button type="button" class="button button-secondary button-small" data-action="add-automation-node" data-type="wait">+ Wait</button></div>
       <div id="automationSteps" class="panel-body"></div>
       <label class="checkbox-row"><input name="active" type="checkbox" class="checkbox-input"> Activate after saving</label><button class="button button-primary">Save workflow version</button></form></section>
     <section id="automationRunPanel" class="panel hidden"></section>
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Workflows</h2><p class="panel-subtitle">${fmtNumber(result.data?.length ?? 0)} workflows</p></div></div><div class="table-wrap"><table><thead><tr><th>Automation</th><th>Trigger</th><th>Status</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table></div></section>`);
-  renderAutomationSteps();
+  renderAutomationGraph();
 }
 
 async function renderUsage() {
@@ -590,30 +708,42 @@ $('#viewRoot').addEventListener('click', async event => {
     else if (action === 'field-required') { await api(`${workspacePath(`custom-fields/${encodeURIComponent(id)}`)}`, { method: 'PATCH', body: { required: button.dataset.required === 'true' } }); showToast('Field settings updated.'); await renderWorkspace(); }
     else if (action === 'toggle-assignment-rule') { await api(`${workspacePath(`assignment-rules/${encodeURIComponent(id)}`)}`, { method:'PATCH', body:{ active:button.dataset.active==='true' } }); showToast('Assignment rule updated.'); await renderWorkspace(); }
     else if (action === 'toggle-scoring-rule') { await api(`${workspacePath(`scoring-rules/${encodeURIComponent(id)}`)}`, { method:'PATCH', body:{ active:button.dataset.active==='true' } }); showToast('Scoring rule updated.'); await renderWorkspace(); }
-    else if (action === 'toggle-automation-form') $('#automationFormPanel').classList.toggle('hidden');
+    else if (action === 'toggle-automation-form') { appState.automationEditingId=null; appState.automationTriggerConfig={}; appState.automationGraph=newAutomationGraph(); const form=$('#automationForm'); if(form){form.reset();form.elements.active.checked=false;} renderAutomationGraph(); $('#automationFormPanel').classList.toggle('hidden'); }
     else if (action === 'edit-automation') await loadAutomationEditor(id, false);
     else if (action === 'clone-automation') await loadAutomationEditor(id, true);
-    else if (action === 'test-automation') { const leadId=prompt('Lead ID for this test run (optional):')||null; await api(`${workspacePath(`automations/${encodeURIComponent(id)}/test`)}`,{method:'POST',headers:{'Idempotency-Key':`test-${crypto.randomUUID()}`},body:{leadId}});showToast('Automation test queued.'); }
-    else if (action === 'add-automation-step') { appState.automationSteps ??= []; appState.automationSteps.push({ type: button.dataset.type, config: automationDefaultConfig(button.dataset.type) }); renderAutomationSteps(); }
-    else if (action === 'remove-automation-step') { appState.automationSteps.splice(Number(button.dataset.index), 1); renderAutomationSteps(); }
+    else if (action === 'test-automation') { const leadId=prompt('Lead ID for this safe dry run:'); if(!leadId)return; await api(`${workspacePath(`automations/${encodeURIComponent(id)}/test`)}`,{method:'POST',headers:{'Idempotency-Key':`test-${crypto.randomUUID()}`},body:{leadId}});showToast('Safe automation test queued. No actions will be applied.'); }
+    else if (action === 'add-automation-step') addAutomationNode(button.dataset.type)
+    else if (action === 'add-automation-node') addAutomationNode(button.dataset.type)
+    else if (action === 'remove-automation-node') removeAutomationNode(button.dataset.nodeId)
+    else if (action === 'add-condition-rule') addConditionChild(button.dataset.nodeId,button.dataset.conditionPath,false)
+    else if (action === 'add-condition-group') addConditionChild(button.dataset.nodeId,button.dataset.conditionPath,true)
+    else if (action === 'remove-condition') removeConditionChild(button.dataset.nodeId,button.dataset.conditionPath)
+    else if (action === 'remove-condition-group') removeConditionGroup(button.dataset.nodeId,button.dataset.conditionPath)
     else if (action === 'automation-runs') { const runs = await api(`${workspacePath(`automations/${encodeURIComponent(id)}/runs`)}?limit=50`); const panel=$('#automationRunPanel'); panel.innerHTML=`<div class="panel-header"><h2 class="panel-title">Run history</h2></div><div class="table-wrap"><table><thead><tr><th>Status</th><th>Attempts</th><th>Started</th><th>Completed</th><th>Error</th><th></th></tr></thead><tbody>${(runs.data??[]).map(run=>`<tr><td>${badge(run.status)}</td><td>${escapeHtml(run.attempt_count)}</td><td>${fmtDate(run.started_at,{time:true})}</td><td>${fmtDate(run.completed_at,{time:true})}</td><td>${escapeHtml(run.error_message||'—')}</td><td><button class="quiet-button" data-action="automation-run-detail" data-id="${escapeHtml(id)}" data-run-id="${escapeHtml(run.id)}">Details</button></td></tr>`).join('')||'<tr><td colspan="6" class="empty-state">No runs yet.</td></tr>'}</tbody></table></div>`; panel.classList.remove('hidden'); }
+    else if (action === 'retry-automation-run') { await api(`${workspacePath(`automations/${encodeURIComponent(id)}/runs/${encodeURIComponent(button.dataset.runId)}/retry`)}`,{method:'POST'}); showToast('Failed workflow run queued for a safe retry.'); await renderAutomations(); }
     else if (action === 'automation-run-detail') {
       const detail=await api(`${workspacePath(`automations/${encodeURIComponent(id)}/runs/${encodeURIComponent(button.dataset.runId)}`)}`);
-      const actions=detail.run?.definition?.actions??[]; const panel=$('#automationRunPanel');
-      panel.innerHTML=`<div class="panel-header"><div><h2 class="panel-title">Run details</h2><p class="panel-subtitle">Version ${escapeHtml(detail.run?.version_number??'—')} · ${badge(detail.run?.status??'unknown')}</p></div><button class="quiet-button" data-action="automation-runs" data-id="${escapeHtml(id)}">Back to runs</button></div>
-        <div class="table-wrap"><table><thead><tr><th>Step</th><th>Action</th><th>Status</th><th>Result</th><th>Completed</th></tr></thead><tbody>${(detail.steps??[]).map(step=>{const actionDef=actions[step.position]??{};return `<tr><td>${escapeHtml(Number(step.position)+1)}</td><td>${escapeHtml(actionDef.type||actionDef.actionType||'action')}</td><td>${badge(step.status)}</td><td><code>${escapeHtml(JSON.stringify(step.result??{}))}</code></td><td>${fmtDate(step.completed_at,{time:true})}</td></tr>`;}).join('')||'<tr><td colspan="5" class="empty-state">No step records were written for this run.</td></tr>'}</tbody></table></div>`;
+      const actions=detail.run?.definition?.actions??[]; const graphNodes=detail.run?.definition?.graph?.nodes??[]; const canRetry=['owner','admin','manager'].includes(appState.role); const retryButton=detail.run?.status==='failed'&&canRetry?`<button class="button button-secondary" data-action="retry-automation-run" data-id="${escapeHtml(id)}" data-run-id="${escapeHtml(button.dataset.runId)}">Retry failed run</button>`:''; const panel=$('#automationRunPanel');
+      panel.innerHTML=`<div class="panel-header"><div><h2 class="panel-title">Run details</h2><p class="panel-subtitle">Version ${escapeHtml(detail.run?.version_number??'—')} · ${badge(detail.run?.status??'unknown')}</p></div><div>${retryButton} <button class="quiet-button" data-action="automation-runs" data-id="${escapeHtml(id)}">Back to runs</button></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Step</th><th>Action</th><th>Status</th><th>Result</th><th>Completed</th></tr></thead><tbody>${(detail.steps??[]).map(step=>{const actionDef=actions[step.position]??{};const graphNode=graphNodes[step.position];return `<tr><td>${escapeHtml(Number(step.position)+1)}</td><td>${escapeHtml(graphNode?`${graphNode.label||graphNode.id} · ${graphNode.type}`:(actionDef.type||actionDef.actionType||'action'))}</td><td>${badge(step.status)}</td><td><code>${escapeHtml(JSON.stringify(step.result??{}))}</code></td><td>${fmtDate(step.completed_at,{time:true})}</td></tr>`;}).join('')||'<tr><td colspan="5" class="empty-state">No step records were written for this run.</td></tr>'}</tbody></table></div>`;
       panel.classList.remove('hidden');
     }
     else if (action === 'reload-view') await renderView(appState.view);
     else if (action === 'run-automation') {
+      const leadId=prompt('Lead ID to run this workflow for:'); if(!leadId)return;
       const key = `manual-${crypto.randomUUID()}`;
-      await api(`${workspacePath(`automations/${encodeURIComponent(id)}`)}`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: {} });
+      await api(`${workspacePath(`automations/${encodeURIComponent(id)}`)}`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: { leadId } });
       showToast('Automation run queued.'); await renderAutomations();
     }
   } catch (error) { showToast(error.message, 'error'); }
 });
 
 $('#viewRoot').addEventListener('change', async event => {
+  if (event.target.matches('[data-graph-connection]')) { updateGraphConnection(event.target); return; }
+  if (event.target.matches('[data-node-label]')) { const node=graphNode(event.target.dataset.nodeId); if(node)node.label=event.target.value; return; }
+  if (event.target.matches('[data-automation-action-type]')) { const node=graphNode(event.target.dataset.nodeId); if(node){ node.action={type:event.target.value,config:automationDefaultConfig(event.target.value)}; renderAutomationGraph(); } return; }
+  if (event.target.matches('[data-automation-config]')) { const node=graphNode(event.target.dataset.nodeId); if(node){ node.action??={type:'wait',config:{}}; node.action.config??={}; const key=event.target.dataset.key; if(node.type==='wait')node.minutes=Number(event.target.value); else if(event.target.value==='')delete node.action.config[key]; else node.action.config[key]=event.target.type==='number'?Number(event.target.value):event.target.value; if(key==='pipelineId')node.action.config.stageId=''; } return; }
+  if (event.target.matches('[data-condition-key], [data-condition-group]')) { handleConditionControl(event.target); return; }
   if (event.target.id === 'csvImportFile') {
     appState.csvImportText = null; appState.csvImportFields = []; appState.csvImportErrors = [];
     $('#csvImportPreview')?.classList.add('hidden'); $('#csvImportPreview')?.replaceChildren();
@@ -661,6 +791,8 @@ $('#viewRoot').addEventListener('change', async event => {
 });
 
 $('#viewRoot').addEventListener('input', event => {
+  if (event.target.matches('[data-automation-config]')) { const node=graphNode(event.target.dataset.nodeId); if(node){ const key=event.target.dataset.key; node.action??={type:'wait',config:{}}; node.action.config??={}; if(event.target.value==='')delete node.action.config[key];else node.action.config[key]=event.target.type==='number'?Number(event.target.value):event.target.value; } return; }
+  if (event.target.matches('[data-condition-key]')) { handleConditionControl(event.target); return; }
   if (event.target.id === 'leadSearch') {
     clearTimeout(appState.searchTimer);
     appState.searchTimer = setTimeout(async () => { appState.leadSearch = event.target.value; appState.cursor = null; await renderLeads(); }, 250);
@@ -737,17 +869,13 @@ $('#viewRoot').addEventListener('submit', async event => {
       delete call.metadataNotes;
       await api(workspacePath('calls'), { method: 'POST', body: call }); showToast('Call record saved.'); await renderCalling();
     } else if (form.id === 'automationForm') {
-      let conditionConfig = {}; if (input.conditions) { try { conditionConfig = JSON.parse(input.conditions); } catch { throw new Error('Trigger conditions must be valid JSON.'); } }
-      const actions = (appState.automationSteps ?? []).map((step, index) => {
-        const control = form.querySelector(`[data-step-config="${index}"]`); let config = step.config;
-        if (control) { try { config = JSON.parse(control.value); } catch { throw new Error(`Step ${index + 1} configuration must be valid JSON.`); } }
-        return { type: step.type, config };
-      });
-      if (!actions.length) throw new Error('Add at least one automation action.');
-      const payload={ name: input.name, description: input.description || null, triggerType: input.triggerType, triggerConfig: conditionConfig, actions, active: form.elements.active.checked };
-      const result = appState.automationEditingId ? await api(`${workspacePath(`automations/${encodeURIComponent(appState.automationEditingId)}`)}`, { method: 'PATCH', body: payload }) : await api(workspacePath('automations'), { method: 'POST', body: payload });
-      appState.automationEditingId=null; appState.automationSteps = [{ type: 'create_task', config: automationDefaultConfig('create_task') }];
-      showToast(`Automation saved${result.active ? ' and activated' : ''}.`); await renderAutomations();
+      const graph=ensureAutomationGraph();
+      const actions=graph.nodes.filter(node=>node.type==='action'||node.type==='wait').map(node=>node.type==='wait'?{type:'wait',config:{minutes:node.minutes}}:node.action);
+      if (!actions.length) throw new Error('Add at least one action node.');
+      const payload={ name:input.name,description:input.description||null,triggerType:input.triggerType,triggerConfig:appState.automationTriggerConfig??{},actions,graph,active:form.elements.active.checked };
+      const result=appState.automationEditingId?await api(`${workspacePath(`automations/${encodeURIComponent(appState.automationEditingId)}`)}`,{method:'PATCH',body:payload}):await api(workspacePath('automations'),{method:'POST',body:payload});
+      appState.automationEditingId=null;appState.automationTriggerConfig={};appState.automationGraph=newAutomationGraph();
+      showToast(`Automation saved${result.active?' and activated':''}.`);await renderAutomations();
     } else if (form.id === 'estimateForm') {
       const estimate = await api(workspacePath('usage/estimate'), { method: 'POST', body: { ...input, quantity: Number(input.quantity) } });
       $('#estimateResult').innerHTML = `<div class="notice notice-green">Estimated provider cost: <strong>${fmtMoney(estimate.providerCost, estimate.currency)}</strong> · Customer charge: <strong>${fmtMoney(estimate.customerCharge, estimate.currency)}</strong> · Rate ${escapeHtml(estimate.rateId.slice(0, 8))}</div>`;

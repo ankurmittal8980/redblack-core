@@ -16,6 +16,7 @@ const graph = {
 test('automation graph validates branching, joins and nested AND/OR comparisons', () => {
   const normalized = normalizeAutomationGraph(graph, action => action);
   assert.equal(normalized.edges.length, 4);
+  assert.equal(normalized.nodes[0].label, 'gate');
   assert.equal(evaluateAutomationCondition(normalized.nodes[0].condition, { lead: { score: 75, status: 'Qualified' } }), true);
   assert.equal(evaluateAutomationCondition(normalized.nodes[0].condition, { lead: { score: 35, status: 'Qualified' } }), false);
 });

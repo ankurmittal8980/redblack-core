@@ -476,6 +476,11 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           sendJson(response, 200, result.rows[0]); return;
         }
 
+        if (suffix === 'members/choices' && request.method === 'GET') {
+          requirePermission(context, 'crm:read');
+          const result = await db.query(`SELECT wm.user_id, u.display_name, wm.role FROM workspace_members wm JOIN users u ON u.id=wm.user_id WHERE wm.workspace_id=$1 AND wm.active=true ORDER BY u.display_name`, [workspaceId]);
+          sendJson(response, 200, { data: result.rows }); return;
+        }
         if (suffix === 'members' && request.method === 'GET') {
           requirePermission(context, 'members:manage');
           const result = await db.query(
@@ -1217,7 +1222,11 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
               optionalString(input.externalProvider, 'externalProvider', 80), optionalString(input.externalEventId, 'externalEventId', 240), optionalString(input.notes, 'notes', 5000)]
           );
           await audit(db, { workspaceId, actorUserId: current.userId, action: 'meeting.created', entityType: 'meeting', entityId: result.rows[0].id, request });
-          if (leadId) await dispatchAutomationEvent(db, { workspaceId, eventType: 'meeting.created', leadId, eventId: `meeting-created:${result.rows[0].id}`, actorUserId: current.userId });
+          if (leadId) {
+            const eventData = { meetingId: result.rows[0].id, startsAt: result.rows[0].starts_at ?? null, status: result.rows[0].status };
+            await dispatchAutomationEvent(db, { workspaceId, eventType: 'meeting.created', leadId, eventId: `meeting-created:${result.rows[0].id}`, actorUserId: current.userId, eventData });
+            await dispatchAutomationEvent(db, { workspaceId, eventType: 'appointment.created', leadId, eventId: `appointment-created:${result.rows[0].id}`, actorUserId: current.userId, eventData });
+          }
           sendJson(response, 201, result.rows[0]); return;
         }
         const meetingMatch = suffix.match(/^meetings\/([^/]+)$/);
@@ -1235,7 +1244,11 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           if (!sets.length) throw new HttpError(400, 'NO_FIELDS', 'No supported meeting fields were provided.');
           const result = await db.query(`UPDATE meetings SET ${sets.join(', ')} WHERE workspace_id = $1 AND id = $2 RETURNING *`, values);
           if (!result.rows[0]) throw new HttpError(404, 'MEETING_NOT_FOUND', 'Meeting was not found.');
-          if (result.rows[0].status === 'missed' && result.rows[0].lead_id) await dispatchAutomationEvent(db, { workspaceId, eventType: 'meeting.missed', leadId: result.rows[0].lead_id, eventId: `meeting-missed:${meetingId}`, actorUserId: current.userId, eventData: { status: 'missed' } });
+          if (result.rows[0].status === 'missed' && result.rows[0].lead_id) {
+            const eventData = { meetingId, status: 'missed' };
+            await dispatchAutomationEvent(db, { workspaceId, eventType: 'meeting.missed', leadId: result.rows[0].lead_id, eventId: `meeting-missed:${meetingId}`, actorUserId: current.userId, eventData });
+            await dispatchAutomationEvent(db, { workspaceId, eventType: 'appointment.missed', leadId: result.rows[0].lead_id, eventId: `appointment-missed:${meetingId}`, actorUserId: current.userId, eventData });
+          }
           sendJson(response, 200, result.rows[0]); return;
         }
 
@@ -1462,6 +1475,21 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             const result = await queueAutomationRun(db, { workspaceId, automationId, leadId: input.leadId ? uuid(input.leadId, 'leadId') : null, idempotencyKey: `test:${key}`, actorUserId: current.userId, test: true });
             sendJson(response, 202, result); return;
           }
+          const retryMatch = action.match(/^runs\/([^/]+)\/retry$/);
+          if (request.method === 'POST' && retryMatch) {
+            requirePermission(context, 'automation:manage');
+            const runId = uuid(retryMatch[1], 'runId');
+            const retried = await transaction(db, async client => {
+              const prior = await client.query('SELECT id,status,metadata FROM automation_runs WHERE workspace_id=$1 AND automation_id=$2 AND id=$3 FOR UPDATE', [workspaceId, automationId, runId]);
+              if (!prior.rows[0]) throw new HttpError(404, 'AUTOMATION_RUN_NOT_FOUND', 'Automation run was not found.');
+              if (prior.rows[0].status !== 'failed') throw new HttpError(409, 'AUTOMATION_RUN_NOT_FAILED', 'Only failed automation runs can be retried.');
+              const metadata = { ...(prior.rows[0].metadata ?? {}), failureCount: 0, retryRequestedBy: current.userId };
+              const result = await client.query(`UPDATE automation_runs SET status='queued',started_at=NULL,completed_at=NULL,error_message=NULL,retry_after=NULL,resume_at=NULL,metadata=$4::jsonb WHERE workspace_id=$1 AND automation_id=$2 AND id=$3 RETURNING id,status,attempt_count,created_at`, [workspaceId, automationId, runId, JSON.stringify(metadata)]);
+              await audit(client, { workspaceId, actorUserId: current.userId, action: 'automation.run_retried', entityType: 'automation_run', entityId: runId, request, metadata: { automationId } });
+              return result.rows[0];
+            });
+            sendJson(response, 202, retried); return;
+          }
           const runDetailMatch = action.match(/^runs\/([^/]+)$/);
           if (request.method === 'GET' && runDetailMatch) {
             const runId = uuid(runDetailMatch[1], 'runId');
@@ -1631,6 +1659,11 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             );
             const message = inserted.rows[0] ?? (await client.query('SELECT id, workspace_id, lead_id, channel, direction, provider_message_id, status, sent_at, delivered_at FROM messages WHERE provider_id=$1 AND provider_message_id=$2', [providerConfig.rows[0].id, providerMessageId])).rows[0];
             await audit(client, { workspaceId, actorUserId: null, action: 'message.webhook_received', entityType: 'message', entityId: message.id, request, metadata: { provider, eventId, channel } });
+            if (message.direction === 'inbound' && message.lead_id) {
+              const eventType = message.channel === 'email' ? 'email.incoming' : 'message.incoming';
+              await dispatchAutomationEvent(client, { workspaceId, eventType, leadId: message.lead_id, eventId: `message-incoming:${message.id}`, eventData: { messageId: message.id, channel: message.channel, status: message.status, provider, subject: message.subject ?? null } });
+            }
+            await dispatchAutomationEvent(client, { workspaceId, eventType: 'webhook.received', leadId: message.lead_id, eventId: `webhook-message:${provider}:${eventId}`, eventData: { provider, objectType: 'message', messageId: message.id, channel: message.channel } });
             return { message, duplicate: false };
           });
           sendJson(response, 202, stored.duplicate ? { received: true, duplicate: true } : { received: true, message: stored.message }); return;
@@ -1664,18 +1697,25 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             if (!prior.rows[0] || prior.rows[0].workspace_id !== workspaceId) throw new HttpError(409, 'PROVIDER_CALL_CONFLICT', 'The provider call ID is already associated with a different workspace.');
             call = prior.rows[0];
           }
-          if (callEvent.endedAt && call.duration_seconds > 0) {
-            let internalCharge = null;
-            try { internalCharge = (await quoteUsage(client, { workspaceId, provider, service: 'voice', usageType: 'call_duration', quantity: String(call.duration_seconds), unit: 'second' })).customerCharge; }
-            catch (error) { if (error.code !== 'RATE_NOT_CONFIGURED') throw error; }
-            await client.query(
-              `INSERT INTO usage_events(workspace_id, provider, service, usage_type, quantity, unit, provider_cost, internal_charge, currency, external_reference, idempotency_key, metadata)
-               VALUES($1,$2,'voice','call_duration',$3,'second',$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT(workspace_id,idempotency_key) DO NOTHING`,
-              [workspaceId, provider, call.duration_seconds, callEvent.providerCost == null ? null : String(finiteNumber(callEvent.providerCost, 'providerCost', { min: 0 })), internalCharge,
-                requiredString(callEvent.currency ?? 'INR', 'currency', { min: 3, max: 3 }).toUpperCase(), providerCallId, `call:${call.id}:final_duration`, JSON.stringify({ eventId })]
-            );
-            if (leadId) await dispatchAutomationEvent(client, { workspaceId, eventType: 'call.ended', leadId, eventId: `call-ended:${call.id}`, actorUserId: null });
+          if (callEvent.endedAt) {
+            if (call.duration_seconds > 0) {
+              let internalCharge = null;
+              try { internalCharge = (await quoteUsage(client, { workspaceId, provider, service: 'voice', usageType: 'call_duration', quantity: String(call.duration_seconds), unit: 'second' })).customerCharge; }
+              catch (error) { if (error.code !== 'RATE_NOT_CONFIGURED') throw error; }
+              await client.query(
+                `INSERT INTO usage_events(workspace_id, provider, service, usage_type, quantity, unit, provider_cost, internal_charge, currency, external_reference, idempotency_key, metadata)
+                 VALUES($1,$2,'voice','call_duration',$3,'second',$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT(workspace_id,idempotency_key) DO NOTHING`,
+                [workspaceId, provider, call.duration_seconds, callEvent.providerCost == null ? null : String(finiteNumber(callEvent.providerCost, 'providerCost', { min: 0 })), internalCharge,
+                  requiredString(callEvent.currency ?? 'INR', 'currency', { min: 3, max: 3 }).toUpperCase(), providerCallId, `call:${call.id}:final_duration`, JSON.stringify({ eventId })]
+              );
+            }
+            if (leadId) {
+              const eventData = { provider, providerCallId, status: call.status, durationSeconds: call.duration_seconds, direction: callEvent.direction };
+              await dispatchAutomationEvent(client, { workspaceId, eventType: 'call.ended', leadId, eventId: `call-ended:${call.id}`, actorUserId: null, eventData });
+              await dispatchAutomationEvent(client, { workspaceId, eventType: 'call.completed', leadId, eventId: `call-completed:${call.id}`, actorUserId: null, eventData });
+            }
           }
+          await dispatchAutomationEvent(client, { workspaceId, eventType: 'webhook.received', leadId, eventId: `webhook-call:${provider}:${eventId}`, eventData: { provider, objectType: 'call', callId: call.id, status: call.status } });
           return { call, duplicate: false };
         });
         sendJson(response, 202, result.duplicate ? { received: true, duplicate: true } : { received: true, call: result.call }); return;
@@ -1724,11 +1764,11 @@ export function normalizeAutomation(input) {
       if (type === 'wait') return { type, config: { minutes: Math.trunc(finiteNumber(config.minutes, 'minutes', { min: 1, max: 525600 })) } };
       return { type, config: { channel: enumValue(config.channel, 'channel', CHANNELS), subject: optionalString(config.subject, 'subject', 500), body: requiredString(config.body, 'body', { max: 10000 }) } };
     }),
-    graph: input.graph == null ? null : (() => { try { return normalizeAutomationGraph(input.graph, action => normalizeAutomation({ name: input.name ?? 'Workflow', triggerType: 'manual', actions: [action] }).actions[0]); } catch (error) { throw new ValidationError(error.message, 'graph'); } })()
+    graph: input.graph == null ? null : (() => { try { const graph = normalizeAutomationGraph(input.graph, action => normalizeAutomation({ name: input.name ?? 'Workflow', triggerType: 'manual', actions: [action] }).actions[0]); if (graph.nodes.filter(node => node.type === 'action' || node.type === 'wait').length > 25) throw new Error('Graph can contain no more than 25 action or wait nodes.'); return graph; } catch (error) { throw new ValidationError(error.message, 'graph'); } })()
   };
 }
 
-async function queueAutomationRun(db, { workspaceId, automationId, leadId, idempotencyKey, actorUserId, test }) {
+async function queueAutomationRun(db, { workspaceId, automationId, leadId, idempotencyKey, actorUserId, test, eventData }) {
   if (leadId) {
     const lead = await db.query('SELECT id FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
     if (!lead.rows[0]) throw new HttpError(404, 'LEAD_NOT_FOUND', 'Lead was not found in this workspace.');
@@ -1736,9 +1776,9 @@ async function queueAutomationRun(db, { workspaceId, automationId, leadId, idemp
   const result = await db.query(
     `INSERT INTO automation_runs(workspace_id, automation_id, version_id, lead_id, status, idempotency_key, metadata)
      SELECT a.workspace_id, a.id, a.current_version_id, $3, 'queued', $4, $5::jsonb
-       FROM automations a WHERE a.workspace_id=$1 AND a.id=$2 AND a.active=true AND a.current_version_id IS NOT NULL
+       FROM automations a WHERE a.workspace_id=$1 AND a.id=$2 AND (a.active=true OR $6::boolean=true) AND a.current_version_id IS NOT NULL
      ON CONFLICT(automation_id, idempotency_key) DO NOTHING RETURNING *`,
-    [workspaceId, automationId, leadId, idempotencyKey, JSON.stringify({ requestedBy: actorUserId, test })]
+    [workspaceId, automationId, leadId, idempotencyKey, JSON.stringify({ requestedBy: actorUserId, test, eventData: eventData ?? {} }), Boolean(test)]
   );
   if (result.rows[0]) return result.rows[0];
   const prior = await db.query('SELECT * FROM automation_runs WHERE workspace_id=$1 AND automation_id=$2 AND idempotency_key=$3', [workspaceId, automationId, idempotencyKey]);
@@ -1841,7 +1881,8 @@ export async function dispatchAutomationEvent(db, { workspaceId, eventType, lead
       leadId,
       idempotencyKey: `event:${eventId}`,
       actorUserId,
-      test: false
+      test: false,
+      eventData
     });
   }
 }

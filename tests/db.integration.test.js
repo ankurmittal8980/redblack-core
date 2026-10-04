@@ -358,7 +358,7 @@ test('CSV import previews mappings, reports physical row errors and exports the 
 test('PostgreSQL automation graph branches, journals decisions and resumes waits idempotently', { skip: !databaseUrl }, async () => {
   process.env.DATABASE_URL = databaseUrl;
   process.env.APP_ENV = 'test';
-  const [{ Pool }, { applyMigrations }, { normalizeAutomation }, worker] = await Promise.all([
+  const [{ Pool }, { applyMigrations }, { normalizeAutomation, dispatchAutomationEvent }, worker] = await Promise.all([
     import('pg'), import('../backend/src/migrate.js'), import('../backend/src/server.js'), import('../backend/src/worker.js')
   ]);
   const db = new Pool({ connectionString: databaseUrl });
@@ -371,26 +371,31 @@ test('PostgreSQL automation graph branches, journals decisions and resumes waits
     await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, user.rows[0].id]);
     const lead = await db.query("INSERT INTO leads(workspace_id,first_name,status,score) VALUES($1,'Branch','Qualified',85) RETURNING id", [workspaceId]);
     const definition = normalizeAutomation({
-      name: 'Qualified graph route', triggerType: 'manual', triggerConfig: {},
+      name: 'Qualified graph route', triggerType: 'message.incoming', triggerConfig: {},
       actions: [
-        { type: 'create_note', config: { title: 'YES branch executed', body: 'score and status matched' } },
+        { type: 'update_lead', config: { status: 'Connected' } },
+        { type: 'create_note', config: { title: 'YES branch executed', body: 'score, status and event matched' } },
         { type: 'create_note', config: { title: 'NO branch executed', body: 'condition did not match' } }
       ],
       graph: {
-        version: 1, startNodeId: 'qualified',
+        version: 1, startNodeId: 'connect',
         nodes: [
-          { id: 'qualified', type: 'condition', condition: { all: [
+          { id: 'connect', type: 'action', label: 'Mark connected', action: { type: 'update_lead', config: { status: 'Connected' } } },
+          { id: 'qualified', type: 'condition', label: 'Qualified route', condition: { all: [
             { field: 'lead.score', operator: '>=', value: 70 },
+            { field: 'lead.status', operator: '=', value: 'Connected' },
+            { field: 'event.fromStageId', operator: '=', value: 'prior_stage' },
             { any: [
               { field: 'lead.status', operator: '=', value: 'Qualified' },
               { field: 'lead.status', operator: '=', value: 'Connected' }
             ] }
           ] } },
-          { id: 'yes_note', type: 'action', action: { type: 'create_note', config: { title: 'YES branch executed', body: 'score and status matched' } } },
-          { id: 'no_note', type: 'action', action: { type: 'create_note', config: { title: 'NO branch executed', body: 'condition did not match' } } },
+          { id: 'yes_note', type: 'action', label: 'YES note', action: { type: 'create_note', config: { title: 'YES branch executed', body: 'score, status and event matched' } } },
+          { id: 'no_note', type: 'action', label: 'NO note', action: { type: 'create_note', config: { title: 'NO branch executed', body: 'condition did not match' } } },
           { id: 'end', type: 'end' }
         ],
         edges: [
+          { from: 'connect', to: 'qualified', label: 'next' },
           { from: 'qualified', to: 'yes_note', label: 'yes' },
           { from: 'qualified', to: 'no_note', label: 'no' },
           { from: 'yes_note', to: 'end', label: 'next' },
@@ -398,18 +403,22 @@ test('PostgreSQL automation graph branches, journals decisions and resumes waits
         ]
       }
     });
-    const automation = await db.query("INSERT INTO automations(workspace_id,name,active,trigger_type,trigger_config,created_by) VALUES($1,$2,true,'manual','{}'::jsonb,$3) RETURNING id", [workspaceId, definition.name, user.rows[0].id]);
+    const automation = await db.query("INSERT INTO automations(workspace_id,name,active,trigger_type,trigger_config,created_by) VALUES($1,$2,false,'message.incoming','{}'::jsonb,$3) RETURNING id", [workspaceId, definition.name, user.rows[0].id]);
     const version = await db.query('INSERT INTO automation_versions(workspace_id,automation_id,version_number,definition,created_by) VALUES($1,$2,1,$3::jsonb,$4) RETURNING id', [workspaceId, automation.rows[0].id, JSON.stringify(definition), user.rows[0].id]);
-    await db.query('UPDATE automations SET current_version_id=$3 WHERE workspace_id=$1 AND id=$2', [workspaceId, automation.rows[0].id, version.rows[0].id]);
-    const run = await db.query("INSERT INTO automation_runs(workspace_id,automation_id,version_id,lead_id,status,idempotency_key,metadata) VALUES($1,$2,$3,$4,'running',$5,$6::jsonb) RETURNING *", [workspaceId, automation.rows[0].id, version.rows[0].id, lead.rows[0].id, `graph:${token}`, JSON.stringify({ requestedBy: user.rows[0].id })]);
+    await db.query('UPDATE automations SET current_version_id=$3,active=true WHERE workspace_id=$1 AND id=$2', [workspaceId, automation.rows[0].id, version.rows[0].id]);
+    await dispatchAutomationEvent(db, { workspaceId, eventType: 'message.incoming', leadId: lead.rows[0].id, eventId: `graph:${token}`, actorUserId: user.rows[0].id, eventData: { fromStageId: 'prior_stage', channel: 'whatsapp' } });
+    await dispatchAutomationEvent(db, { workspaceId, eventType: 'message.incoming', leadId: lead.rows[0].id, eventId: `graph:${token}`, actorUserId: user.rows[0].id, eventData: { fromStageId: 'prior_stage', channel: 'whatsapp' } });
+    const run = await db.query('SELECT * FROM automation_runs WHERE workspace_id=$1 AND automation_id=$2 AND idempotency_key=$3', [workspaceId, automation.rows[0].id, `event:graph:${token}`]);
+    assert.equal(run.rowCount, 1);
+    await db.query("UPDATE automation_runs SET status='running' WHERE workspace_id=$1 AND id=$2", [workspaceId, run.rows[0].id]);
     await worker.runOne({ ...run.rows[0], attempt_count: 1, definition });
     await worker.runOne({ ...run.rows[0], attempt_count: 1, definition });
     const notes = await db.query("SELECT title FROM activities WHERE workspace_id=$1 AND lead_id=$2 AND type='note' AND title IN ('YES branch executed','NO branch executed')", [workspaceId, lead.rows[0].id]);
     assert.deepEqual(notes.rows.map(row => row.title), ['YES branch executed']);
     const steps = await db.query('SELECT position,status,result FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 ORDER BY position', [workspaceId, run.rows[0].id]);
-    assert.equal(steps.rows.length, 2);
-    assert.equal(steps.rows[0].result.branch, 'yes');
-    assert.equal(steps.rows[1].result.nodeId, 'yes_note');
+    assert.equal(steps.rows.length, 3);
+    assert.equal(steps.rows[1].result.branch, 'yes');
+    assert.equal(steps.rows[2].result.nodeId, 'yes_note');
     assert.ok(steps.rows.every(row => row.status === 'completed'));
     const state = await db.query('SELECT status FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, run.rows[0].id]);
     assert.equal(state.rows[0].status, 'completed');
@@ -423,9 +432,9 @@ test('PostgreSQL automation graph branches, journals decisions and resumes waits
         { id: 'end', type: 'end' }
       ], edges: [{ from: 'wait', to: 'after', label: 'next' }, { from: 'after', to: 'end', label: 'next' }] }
     });
-    const waitAutomation = await db.query("INSERT INTO automations(workspace_id,name,active,trigger_type,trigger_config,created_by) VALUES($1,$2,true,'manual','{}'::jsonb,$3) RETURNING id", [workspaceId, waitDefinition.name, user.rows[0].id]);
+    const waitAutomation = await db.query("INSERT INTO automations(workspace_id,name,active,trigger_type,trigger_config,created_by) VALUES($1,$2,false,'manual','{}'::jsonb,$3) RETURNING id", [workspaceId, waitDefinition.name, user.rows[0].id]);
     const waitVersion = await db.query('INSERT INTO automation_versions(workspace_id,automation_id,version_number,definition,created_by) VALUES($1,$2,1,$3::jsonb,$4) RETURNING id', [workspaceId, waitAutomation.rows[0].id, JSON.stringify(waitDefinition), user.rows[0].id]);
-    await db.query('UPDATE automations SET current_version_id=$3 WHERE workspace_id=$1 AND id=$2', [workspaceId, waitAutomation.rows[0].id, waitVersion.rows[0].id]);
+    await db.query('UPDATE automations SET current_version_id=$3,active=true WHERE workspace_id=$1 AND id=$2', [workspaceId, waitAutomation.rows[0].id, waitVersion.rows[0].id]);
     const waitRun = await db.query("INSERT INTO automation_runs(workspace_id,automation_id,version_id,lead_id,status,idempotency_key,metadata) VALUES($1,$2,$3,$4,'running',$5,$6::jsonb) RETURNING *", [workspaceId, waitAutomation.rows[0].id, waitVersion.rows[0].id, lead.rows[0].id, `wait:${token}`, JSON.stringify({ requestedBy: user.rows[0].id })]);
     await worker.runOne({ ...waitRun.rows[0], attempt_count: 1, definition: waitDefinition });
     const suspended = await db.query('SELECT status,resume_at FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, waitRun.rows[0].id]);
@@ -439,6 +448,40 @@ test('PostgreSQL automation graph branches, journals decisions and resumes waits
     assert.equal(afterWait.rowCount, 1);
     const finished = await db.query('SELECT status FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, waitRun.rows[0].id]);
     assert.equal(finished.rows[0].status, 'completed');
+  } finally {
+    await db.end();
+  }
+});
+
+
+test('PostgreSQL automation retries are bounded by failures, not wait resumes', { skip: !databaseUrl }, async () => {
+  process.env.DATABASE_URL = databaseUrl;
+  process.env.APP_ENV = 'test';
+  const [{ Pool }, { applyMigrations }, worker] = await Promise.all([
+    import('pg'), import('../backend/src/migrate.js'), import('../backend/src/worker.js')
+  ]);
+  const db = new Pool({ connectionString: databaseUrl });
+  const token = randomUUID();
+  try {
+    await applyMigrations(db);
+    const workspace = await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', [`Retry Test ${token.slice(0,8)}`, `retry-${token}`]);
+    const workspaceId = workspace.rows[0].id;
+    const user = await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`retry-${token}@example.test`, 'Retry Test']);
+    await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, user.rows[0].id]);
+    const automation = await db.query("INSERT INTO automations(workspace_id,name,active,trigger_type,trigger_config,created_by) VALUES($1,'Retry test',false,'manual','{}'::jsonb,$2) RETURNING id", [workspaceId, user.rows[0].id]);
+    const definition = { actions: [{ type: 'create_task', config: {} }] };
+    const version = await db.query('INSERT INTO automation_versions(workspace_id,automation_id,version_number,definition,created_by) VALUES($1,$2,1,$3::jsonb,$4) RETURNING id', [workspaceId, automation.rows[0].id, JSON.stringify(definition), user.rows[0].id]);
+    await db.query('UPDATE automations SET current_version_id=$3,active=true WHERE workspace_id=$1 AND id=$2', [workspaceId, automation.rows[0].id, version.rows[0].id]);
+    const run = await db.query("INSERT INTO automation_runs(workspace_id,automation_id,version_id,status,idempotency_key,metadata,attempt_count) VALUES($1,$2,$3,'running',$4,$5::jsonb,12) RETURNING *", [workspaceId, automation.rows[0].id, version.rows[0].id, `retry:${token}`, JSON.stringify({ requestedBy: user.rows[0].id, failureCount: 0 })]);
+    for (let failure = 1; failure <= 3; failure += 1) {
+      const current = await db.query('SELECT * FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, run.rows[0].id]);
+      await worker.runOne({ ...current.rows[0], attempt_count: 12, definition });
+      const state = await db.query('SELECT status,metadata,attempt_count FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, run.rows[0].id]);
+      assert.equal(state.rows[0].metadata.failureCount, failure);
+      assert.equal(Number(state.rows[0].attempt_count), 12);
+      assert.equal(state.rows[0].status, failure < 3 ? 'queued' : 'failed');
+      if (failure < 3) await db.query("UPDATE automation_runs SET status='running',retry_after=NULL WHERE workspace_id=$1 AND id=$2", [workspaceId, run.rows[0].id]);
+    }
   } finally {
     await db.end();
   }

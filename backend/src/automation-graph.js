@@ -29,17 +29,17 @@ export function normalizeAutomationGraph(graph, normalizeAction) {
   const normalizedNodes = nodes.map(node => {
     if (!node || typeof node !== 'object' || Array.isArray(node) || typeof node.id !== 'string' || !ID_PATTERN.test(node.id) || ids.has(node.id)) throw new Error('Graph node IDs must be unique valid identifiers.');
     ids.add(node.id);
-    if (node.type === 'condition') return { id: node.id, type: 'condition', condition: validateCondition(node.condition) };
+    if (node.type === 'condition') return { id: node.id, label: typeof node.label === 'string' ? node.label.slice(0,80) : node.id, type: 'condition', condition: validateCondition(node.condition) };
     if (node.type === 'action') {
       if (!node.action || typeof node.action !== 'object') throw new Error(`Action node ${node.id} is missing its action.`);
-      return { id: node.id, type: 'action', action: normalizeAction(node.action) };
+      return { id: node.id, label: typeof node.label === 'string' ? node.label.slice(0,80) : node.id, type: 'action', action: normalizeAction(node.action) };
     }
     if (node.type === 'wait') {
       const minutes = Number(node.minutes);
       if (!Number.isInteger(minutes) || minutes < 1 || minutes > 525600) throw new Error(`Wait node ${node.id} requires minutes from 1 to 525600.`);
-      return { id: node.id, type: 'wait', minutes };
+      return { id: node.id, label: typeof node.label === 'string' ? node.label.slice(0,80) : node.id, type: 'wait', minutes };
     }
-    if (node.type === 'end') return { id: node.id, type: 'end' };
+    if (node.type === 'end') return { id: node.id, label: typeof node.label === 'string' ? node.label.slice(0,80) : node.id, type: 'end' };
     throw new Error(`Unsupported graph node type: ${String(node.type)}.`);
   });
   if (!ids.has(startNodeId)) throw new Error('Graph startNodeId must refer to a node.');

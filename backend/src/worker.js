@@ -53,14 +53,24 @@ async function enqueueStageAutomations(client, run, { pipelineId, fromStageId, s
     await client.query(
       `INSERT INTO automation_runs(workspace_id, automation_id, version_id, lead_id, status, idempotency_key, metadata)
        VALUES($1,$2,$3,$4,'queued',$5,$6::jsonb) ON CONFLICT(automation_id,idempotency_key) DO NOTHING`,
-      [run.workspace_id, item.id, item.current_version_id, run.lead_id, `event:automation-stage:${run.id}:${stageId}`, JSON.stringify({ requestedBy: null, sourceRunId: run.id })]
+      [run.workspace_id, item.id, item.current_version_id, run.lead_id, `event:automation-stage:${run.id}:${stageId}`, JSON.stringify({ requestedBy: null, sourceRunId: run.id, eventData: { pipelineId, fromStageId, stageId } })]
     );
   }
 }
 
 async function executeAction(run, action, position, nodeId = null) {
-  if (!run.lead_id) throw new Error('This action requires a lead-linked automation run.');
+  if (!run.lead_id && !run.metadata?.test && action.type !== 'invoke_ai') throw new Error('This action requires a lead-linked automation run.');
   const config = action.config ?? {};
+  if (run.metadata?.test) {
+    return transaction(pool, async client => {
+      await client.query(`INSERT INTO automation_action_runs(workspace_id,automation_run_id,version_id,position,status) VALUES($1,$2,$3,$4,'pending') ON CONFLICT(automation_run_id,position) DO NOTHING`, [run.workspace_id,run.id,run.version_id,position]);
+      const prior=await client.query('SELECT status FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3 FOR UPDATE',[run.workspace_id,run.id,position]);
+      if(prior.rows[0]?.status==='completed')return { skipped:true,dryRun:true };
+      const result={nodeId,actionType:action.type,dryRun:true,message:'Test run recorded this action without applying changes or contacting a provider.'};
+      await client.query(`UPDATE automation_action_runs SET status='completed',result=$4::jsonb,completed_at=now() WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3`,[run.workspace_id,run.id,position,JSON.stringify(result)]);
+      return { completed:true,skipped:true,dryRun:true };
+    });
+  }
   return transaction(pool, async client => {
     await client.query(
       `INSERT INTO automation_action_runs(workspace_id, automation_run_id, version_id, position, status)
@@ -233,13 +243,13 @@ async function runGraph(run, graph) {
   const byId = new Map(graph.nodes.map(node => [node.id, node]));
   const positions = new Map(graph.nodes.map((node, index) => [node.id, index]));
   const outgoing = new Map(graph.nodes.map(node => [node.id, graph.edges.filter(edge => edge.from === node.id)]));
-  const context = await automationGraphContext(run);
   let nodeId = graph.startNodeId;
   for (let count = 0; count < 100; count += 1) {
     const node = byId.get(nodeId); if (!node) throw new Error(`Automation graph references missing node ${nodeId}.`);
     if (node.type === 'end') return;
     let nextLabel = 'next';
     if (node.type === 'condition') {
+      const context = await automationGraphContext(run);
       const matched = await recordGraphCondition(run, node, positions.get(node.id), context);
       nextLabel = matched ? 'yes' : 'no';
     } else {
@@ -286,13 +296,15 @@ export async function runOne(run) {
     }
     await pool.query("UPDATE automation_runs SET status='completed', completed_at=now(), error_message=NULL WHERE id=$1 AND status='running'", [run.id]);
   } catch (error) {
-    const retryable = Number(run.attempt_count) < 3;
-    const backoffSeconds = Math.min(300, 2 ** Number(run.attempt_count));
+    const failureCount = Math.max(0, Number(run.metadata?.failureCount ?? 0)) + 1;
+    const retryable = failureCount < 3;
+    const backoffSeconds = Math.min(300, 2 ** (failureCount - 1));
     await pool.query(
       `UPDATE automation_runs SET status=$2, error_message=$3, completed_at=CASE WHEN $2='failed' THEN now() ELSE NULL END,
-          retry_after=CASE WHEN $2='queued' THEN now()+($4::text || ' seconds')::interval ELSE NULL END
+          retry_after=CASE WHEN $2='queued' THEN now()+($4::text || ' seconds')::interval ELSE NULL END,
+          metadata=jsonb_set(COALESCE(metadata,'{}'::jsonb),'{failureCount}',to_jsonb($5::int),true)
         WHERE id=$1`,
-      [run.id, retryable ? 'queued' : 'failed', String(error.message).slice(0, 1000), String(backoffSeconds)]
+      [run.id, retryable ? 'queued' : 'failed', String(error.message).slice(0, 1000), String(backoffSeconds), failureCount]
     );
     process.stderr.write(JSON.stringify({ level: 'error', automationRunId: run.id, code: error.code ?? null, message: error.message }) + '\n');
   }
