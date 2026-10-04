@@ -572,3 +572,84 @@ test('PostgreSQL stage-change dispatch enforces nested trigger conditions using 
     await db.end();
   }
 });
+
+
+test('PostgreSQL automation retry preserves completed steps and exposes step errors safely', { skip: !databaseUrl }, async () => {
+  process.env.DATABASE_URL = databaseUrl;
+  process.env.APP_ENV = 'test';
+  const [{ Pool }, { applyMigrations }, { normalizeAutomation, createRedBlackServer }, { createSession }, worker] = await Promise.all([
+    import('pg'), import('../backend/src/migrate.js'), import('../backend/src/server.js'), import('../backend/src/auth.js'), import('../backend/src/worker.js')
+  ]);
+  const db = new Pool({ connectionString: databaseUrl });
+  const token = randomUUID();
+  let server;
+  try {
+    await applyMigrations(db);
+    const workspace = await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', [`Retry Test ${token.slice(0,8)}`, `retry-test-${token}`]);
+    const workspaceId = workspace.rows[0].id;
+    const user = await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`retry-test-${token}@example.test`, 'Retry Test Owner']);
+    const userId = user.rows[0].id;
+    await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, userId]);
+    const lead = await db.query("INSERT INTO leads(workspace_id,first_name) VALUES($1,'Retry Lead') RETURNING id", [workspaceId]);
+    const definition = normalizeAutomation({
+      name: 'Safe retry workflow', triggerType: 'manual', triggerConfig: {},
+      actions: [{ type: 'create_note', config: { title: 'Once only', body: 'Completed before the next action failed.' } }]
+    });
+    const automation = await db.query("INSERT INTO automations(workspace_id,name,active,trigger_type,trigger_config,created_by) VALUES($1,$2,false,'manual','{}'::jsonb,$3) RETURNING id", [workspaceId, definition.name, userId]);
+    const version = await db.query('INSERT INTO automation_versions(workspace_id,automation_id,version_number,definition,created_by) VALUES($1,$2,1,$3::jsonb,$4) RETURNING id', [workspaceId, automation.rows[0].id, JSON.stringify(definition), userId]);
+    await db.query('UPDATE automations SET current_version_id=$3,active=true WHERE workspace_id=$1 AND id=$2', [workspaceId, automation.rows[0].id, version.rows[0].id]);
+    const runResult = await db.query(
+      "INSERT INTO automation_runs(workspace_id,automation_id,version_id,lead_id,status,idempotency_key,metadata) VALUES($1,$2,$3,$4,'running',$5,$6::jsonb) RETURNING *",
+      [workspaceId, automation.rows[0].id, version.rows[0].id, lead.rows[0].id, `retry-run:${token}`, JSON.stringify({ requestedBy: userId })]
+    );
+    const runId = runResult.rows[0].id;
+    const failingDefinition = {
+      actions: [
+        { type: 'create_note', config: { title: 'Once only', body: 'Completed before the next action failed.' } },
+        { type: 'unsupported_test_action', config: { reason: 'exercise failure journal' } }
+      ]
+    };
+    await worker.runOne({ ...runResult.rows[0], definition: failingDefinition });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const current = await db.query('SELECT * FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, runId]);
+      await worker.runOne({ ...current.rows[0], definition: failingDefinition });
+    }
+
+    const failed = await db.query('SELECT status,metadata FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, runId]);
+    assert.equal(failed.rows[0].status, 'failed');
+    const initialSteps = await db.query('SELECT position,status,result FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 ORDER BY position', [workspaceId, runId]);
+    assert.equal(initialSteps.rows[0].status, 'completed');
+    assert.equal(initialSteps.rows[0].result.input.type, 'create_note');
+    assert.ok(initialSteps.rows[0].result.output.activityId);
+    assert.equal(initialSteps.rows[1].status, 'failed');
+    assert.equal(initialSteps.rows[1].result.input.type, 'unsupported_test_action');
+    assert.match(initialSteps.rows[1].result.error, /not supported/);
+
+    const session = await createSession(db, { userId, workspaceId });
+    server = createRedBlackServer({ db });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const endpoint = `http://127.0.0.1:${server.address().port}/api/v1/workspaces/${workspaceId}/automations/${automation.rows[0].id}/runs/${runId}/retry`;
+    const headers = {
+      'content-type': 'application/json',
+      cookie: `rb_session=${encodeURIComponent(session.token)}; rb_csrf=${encodeURIComponent(session.csrf)}`,
+      'x-csrf-token': session.csrf
+    };
+    const retry = await fetch(endpoint, { method: 'POST', headers, body: '{}' });
+    assert.equal(retry.status, 202);
+    const queued = await retry.json();
+    assert.equal(queued.status, 'queued');
+
+    await db.query("UPDATE automation_runs SET status='running' WHERE workspace_id=$1 AND id=$2", [workspaceId, runId]);
+    const retryRun = await db.query('SELECT * FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, runId]);
+    await worker.runOne({ ...retryRun.rows[0], definition: failingDefinition });
+    const noteCount = await db.query("SELECT COUNT(*)::int AS count FROM activities WHERE workspace_id=$1 AND lead_id=$2 AND type='note' AND title='Once only'", [workspaceId, lead.rows[0].id]);
+    assert.equal(noteCount.rows[0].count, 1);
+    const retriedSteps = await db.query('SELECT position,status,result FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 ORDER BY position', [workspaceId, runId]);
+    assert.equal(retriedSteps.rows[0].status, 'completed');
+    assert.equal(retriedSteps.rows[1].result.input.type, 'unsupported_test_action');
+    assert.match(retriedSteps.rows[1].result.error, /not supported/);
+  } finally {
+    if (server) await new Promise(resolve => server.close(resolve));
+    await db.end();
+  }
+});
