@@ -12,6 +12,20 @@ export const OPENAPI_SPEC = Object.freeze({
     { name: 'Communications' }, { name: 'Automation' }, { name: 'Usage and reporting' }
   ],
   paths: {
+    ...Object.fromEntries(['contacts','companies','deals','tickets'].flatMap(entity => [
+      [`${workspace}/${entity}`, { ...protectedGet(`List accessible ${entity}; q/status/trash/offset filters, maximum 100 rows`), ...protectedWrite(`Create ${entity} with validated workspace relationships`) }],
+      [`${workspace}/${entity}/{recordId}`, { ...protectedGet(`Get accessible ${entity} record and history`), ...protectedWrite(`Update ${entity} and atomically record history`, 'patch'), ...protectedWrite(`Soft archive ${entity}`, 'delete'), parameters: [{ name: 'recordId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }] }],
+      [`${workspace}/${entity}/{recordId}/restore`, { ...protectedWrite(`Restore archived ${entity}`), parameters: [{ name: 'recordId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }] }],
+      [`${workspace}/${entity}/{recordId}/notes`, { ...protectedWrite(`Append immutable note to ${entity} history`), parameters: [{ name: 'recordId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }] }]
+    ])),
+    [`${workspace}/leads/{leadId}/convert`]: { ...protectedGet('Get existing conversion'), ...protectedWrite('Atomically convert lead to contact/company/opportunity; retries return existing conversion'), parameters: [{ name: 'leadId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }] },
+    [`${workspace}/search`]: protectedGet('Search accessible leads, contacts, companies, deals and tickets'),
+    [`${workspace}/notifications`]: protectedGet('Read internal CRM notifications for current user only'),
+    [`${workspace}/notifications/{notificationId}/read`]: { ...protectedWrite('Mark own notification read'), parameters: [{ name: 'notificationId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }] },
+    [`${workspace}/reports/crm`]: protectedGet('CRM funnel/conversions/tasks/activities/tickets; from/to ISO dates; reports permission required'),
+    [`${workspace}/inbox`]: protectedGet('List lead/channel threads with per-user internal unread counts'),
+    [`${workspace}/inbox/{leadId}/{channel}`]: { ...protectedGet('Read permitted thread history'), parameters: [{ name: 'leadId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'channel', in: 'path', required: true, schema: { type: 'string', enum: ['email','sms','whatsapp','rcs','voice'] } }] },
+    [`${workspace}/inbox/{leadId}/{channel}/read`]: { ...protectedWrite('Mark permitted inbound messages internally read; does not send provider read receipt'), parameters: [{ name: 'leadId', in: 'path', required: true, schema: { type: 'string', format: 'uuid' } }, { name: 'channel', in: 'path', required: true, schema: { type: 'string', enum: ['email','sms','whatsapp','rcs','voice'] } }] },
     '/health/live': { get: { summary: 'Process liveness', responses: { '200': { description: 'Process is running' } } } },
     '/health/ready': { get: { summary: 'Database readiness', responses: { '200': { description: 'Database is reachable' }, '500': { description: 'Database unavailable' } } } },
     '/api/v1/openapi.json': { get: { summary: 'OpenAPI contract', responses: { '200': { description: 'OpenAPI 3.1 document' } } } },
@@ -93,4 +107,5 @@ export const OPENAPI_SPEC = Object.freeze({
     }
   }
 });
+
 

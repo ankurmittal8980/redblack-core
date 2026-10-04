@@ -12,7 +12,7 @@ test('PostgreSQL migrations apply idempotently and install tenant/security contr
     await applyMigrations(db);
     const migrations = await db.query('SELECT version FROM schema_migrations ORDER BY version');
     assert.deepEqual(migrations.rows.map(row => row.version), ['0001_redblack_crm_core.sql', '0002_security_idempotency_and_operations.sql', '0003_automation_parity.sql', '0004_automation_default_backfill.sql', '0005_repair_automation_workspace_name_constraint.sql', '0006_communication_gateway.sql', '0007_voice_ai_call_metadata.sql', '0008_usage_budgets.sql', '0009_control_center_settings.sql',
-      '0010_crm_builder_rules.sql', '0011_automation_followup_dedupe.sql', '0012_crm_entity_foundations.sql']);
+      '0010_crm_builder_rules.sql', '0011_automation_followup_dedupe.sql', '0012_crm_entity_foundations.sql', '0013_crm_operational_completion.sql']);
     const constraints = await db.query(`SELECT conname FROM pg_constraint WHERE conname = ANY($1::text[])`, [[
       'leads_source_same_workspace_fk', 'lead_pipeline_entries_stage_in_pipeline_fk',
       'tasks_lead_same_workspace_fk', 'automation_runs_version_fk', 'messages_lead_same_workspace_fk'
@@ -730,3 +730,4 @@ test('PostgreSQL automation waits resume once on matching events and lead condit
     await db.end();
   }
 });
+

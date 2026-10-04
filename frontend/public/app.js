@@ -1,6 +1,8 @@
+import { createCrmPlatformUI } from './crm-platform.js';
 const $ = selector => document.querySelector(selector);
 const appState = { user: null, workspace: null, workspaces: [], role: null, view: 'dashboard', cursor: null, leadSearch: '', leadStatus: '', selectedLeads: new Set(), toastTimer: null, csvImportText: null, csvImportFields: [], csvImportErrors: [] };
 const apiRoot = '/api/v1';
+const crmUI = createCrmPlatformUI({ api, workspacePath, setPage, pageHeading, escapeHtml, appState, showToast, renderLeadDetail });
 const VIEW_ROLES = Object.freeze({
   automations: ['owner','admin','manager'],
   usage: ['owner','admin','manager','reporting'],
@@ -230,6 +232,7 @@ function customFieldControl(field) {
 }
 
 async function renderLeadDetail(leadId) {
+  $('#viewRoot').onclick = null; $('#viewRoot').onsubmit = null; $('#viewRoot').onchange = null;
   const [lead, timeline, tagCatalog] = await Promise.all([api(`${workspacePath(`leads/${encodeURIComponent(leadId)}`)}`), api(`${workspacePath(`leads/${encodeURIComponent(leadId)}/timeline`)}`), api(workspacePath('tags'))]);
   const selectedTags = new Set((lead.tags ?? []).map(tag => tag.id));
   const customControls = (lead.customFields ?? []).filter(field => field.config?.visible !== false).sort((a,b)=>(a.config?.order??0)-(b.config?.order??0)).map(customFieldControl).join('');
@@ -237,6 +240,8 @@ async function renderLeadDetail(leadId) {
   setPage(`${pageHeading('LEAD RECORD', [lead.first_name,lead.last_name].filter(Boolean).join(' ') || 'Lead details', lead.company_name || lead.email || lead.phone || '')}
     <section class="panel"><div class="panel-header"><h2 class="panel-title">Contact and qualification</h2><div><button class="button button-secondary button-small" data-action="toggle-lead-edit">Edit</button> <button class="button button-secondary button-small" data-view="leads">Back to leads</button></div></div><div id="leadEditPanel" class="panel-body hidden"><form id="leadEditForm" data-lead-id="${escapeHtml(lead.id)}"><div class="field-grid"><label>First name<input name="firstName" value="${escapeHtml(lead.first_name || '')}"></label><label>Last name<input name="lastName" value="${escapeHtml(lead.last_name || '')}"></label><label>Email<input name="email" type="email" value="${escapeHtml(lead.email || '')}"></label><label>Phone<input name="phone" value="${escapeHtml(lead.phone || '')}"></label><label>Status<input name="status" value="${escapeHtml(lead.status || '')}"></label><label>Score<input name="score" type="number" value="${escapeHtml(lead.score ?? 0)}"></label><label>Temperature<select name="temperature"><option value="">—</option>${['hot','warm','cold'].map(v => `<option value="${v}" ${lead.temperature === v ? 'selected' : ''}>${v}</option>`).join('')}</select></label><label>Budget<input name="budget" type="number" value="${escapeHtml(lead.budget ?? '')}"></label><label>Next action<input name="nextAction" value="${escapeHtml(lead.next_action || '')}"></label><label>Next follow-up<input name="nextActionAt" type="datetime-local" value="${lead.next_action_at ? escapeHtml(new Date(lead.next_action_at).toISOString().slice(0,16)) : ''}"></label><label class="span-2">Notes<textarea name="notes">${escapeHtml(lead.notes || '')}</textarea></label>${customControls}</div><div class="panel-body"><strong>Tags</strong><div class="heading-actions">${tagControls}</div></div><button class="button button-primary" type="submit">Save changes</button></form></div><div class="panel-body"><dl class="key-value"><dt>Email</dt><dd>${escapeHtml(lead.email || '—')}</dd><dt>Phone</dt><dd>${escapeHtml(lead.phone || '—')}</dd><dt>Project</dt><dd>${escapeHtml(lead.brand_project || '—')}</dd><dt>Opportunity type</dt><dd>${escapeHtml(lead.opportunity_type || '—')}</dd><dt>Budget</dt><dd>${lead.budget === null ? '—' : fmtMoney(lead.budget)}</dd><dt>Status</dt><dd>${badge(lead.status)}</dd><dt>Temperature</dt><dd>${badge(lead.temperature)}</dd><dt>Next action</dt><dd>${escapeHtml(lead.next_action || '—')} · ${fmtDate(lead.next_action_at, { time: true })}</dd><dt>Tags</dt><dd>${(lead.tags ?? []).map(tag => badge(tag.name)).join(' ') || '—'}</dd><dt>Notes</dt><dd>${escapeHtml(lead.notes || '—')}</dd></dl></div></section>
     <section class="panel"><div class="panel-header"><div><h2 class="panel-title">Timeline</h2><p class="panel-subtitle">Recent calls, tasks, messages and notes</p></div></div><div class="panel-body">${(timeline.data ?? []).map(item => `<div class="task-row"><span class="badge">${escapeHtml(item.item_type)}</span><div><div class="task-title">${escapeHtml(item.title)}</div><div class="task-meta">${escapeHtml(item.body || item.kind || '')}</div></div><div class="task-due">${fmtDate(item.happened_at, { time: true })}</div></div>`).join('') || '<div class="empty-state">No timeline events yet.</div>'}</div></section>`);
+  if (!['owner','admin','manager','agent'].includes(appState.role)) { $('#leadEditPanel').remove(); $('[data-action="toggle-lead-edit"]').remove(); }
+  await crmUI.conversion(leadId);
 }
 
 async function renderPipelines(selectedPipelineId = null) {
@@ -596,17 +601,21 @@ async function renderView(view) {
   appState.view = view;
   document.querySelectorAll('.nav-item').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   try {
-    if (view === 'dashboard') await renderDashboard();
+    $('#viewRoot').onclick = null; $('#viewRoot').onsubmit = null; $('#viewRoot').onchange = null;
+    if (['contacts','companies','deals','tickets'].includes(view)) await crmUI.list(view);
+    else if (view === 'search') await crmUI.search();
+    else if (view === 'notifications') await crmUI.notifications();
+    else if (view === 'dashboard') await renderDashboard();
     else if (view === 'leads') await renderLeads();
     else if (view === 'trash') await renderTrash();
     else if (view === 'pipelines') await renderPipelines();
     else if (view === 'tasks') await renderTasks();
     else if (view === 'meetings') await renderMeetings();
-    else if (view === 'communications') await renderCommunications();
+    else if (view === 'communications') await crmUI.inbox();
     else if (view === 'calling') await renderCalling();
     else if (view === 'automations') await renderAutomations();
     else if (view === 'usage') await renderUsage();
-    else if (view === 'reports') await renderReports();
+    else if (view === 'reports') { await renderReports(); await crmUI.reports(); }
     else if (view === 'workspace') await renderWorkspace();
     else await renderDashboard();
   } catch (error) {
@@ -927,4 +936,5 @@ $('#viewRoot').addEventListener('submit', async event => {
 });
 
 boot();
+
 
