@@ -16,6 +16,7 @@ import { ValidationError, decimal, objectBody, requiredString, optionalString, u
 import { communications, calling } from './providers.js';
 import { AIGateway } from './ai-gateway.js';
 import { OPENAPI_SPEC } from './openapi.js';
+import { normalizeAutomationGraph } from './automation-graph.js';
 import { parseCsv, serializeCsv } from './csv.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -1722,7 +1723,8 @@ export function normalizeAutomation(input) {
       if (type === 'change_stage') return { type, config: { pipelineId: uuid(config.pipelineId, 'pipelineId'), stageId: uuid(config.stageId, 'stageId') } };
       if (type === 'wait') return { type, config: { minutes: Math.trunc(finiteNumber(config.minutes, 'minutes', { min: 1, max: 525600 })) } };
       return { type, config: { channel: enumValue(config.channel, 'channel', CHANNELS), subject: optionalString(config.subject, 'subject', 500), body: requiredString(config.body, 'body', { max: 10000 }) } };
-    })
+    }),
+    graph: input.graph == null ? null : (() => { try { return normalizeAutomationGraph(input.graph, action => normalizeAutomation({ name: input.name ?? 'Workflow', triggerType: 'manual', actions: [action] }).actions[0]); } catch (error) { throw new ValidationError(error.message, 'graph'); } })()
   };
 }
 
