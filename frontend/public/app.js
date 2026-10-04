@@ -357,17 +357,6 @@ async function renderCalling() {
 
 
 
-function automationDefaultConfig(type) {
-  if (type === 'create_task') return { title: 'Follow up', dueInMinutes: 60, assignTo: 'owner' };
-  if (type === 'create_activity' || type === 'create_note') return { title: 'Automation activity', body: '' };
-  if (type === 'wait') return { minutes: 60 };
-  if (type === 'schedule_follow_up') return { title: 'Follow up', dueInMinutes: 60 };
-  if (type === 'call_webhook') return { url: 'https://', method: 'POST' };
-  if (type === 'notify_user') return { message: 'Follow-up required' };
-  if (type === 'create_message_draft') return { channel: 'whatsapp', body: 'Follow-up message' };
-  return {};
-}
-
 const automationActionTypes = ['create_task','create_activity','change_stage','create_message_draft','update_lead','assign_owner','create_note','invoke_ai','schedule_follow_up','send_communication','start_call'];
 const automationFields = ['lead.score','lead.status','lead.temperature','lead.budget','lead.location','lead.email','lead.phone','lead.owner_user_id','event.pipelineId','event.fromStageId','event.stageId','event.status','event.channel','event.provider','event.subject','event.direction','event.durationSeconds','event.messageId','event.callId','event.objectType'];
 const automationOperators = ['=','!=','>','>=','<','<=','contains','does not contain','is empty','is not empty','in','not in'];
