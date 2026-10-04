@@ -55,6 +55,21 @@ test('knowledge lifecycle enforces workspace/agent visibility, version cleanup, 
     assert.equal(await db.query('SELECT id FROM knowledge_chunks WHERE workspace_id=$1 AND document_id=$2 AND version_id=$3', [wsA, visibleDoc.id, first.versionId]).then(result => result.rowCount), 0);
     assert.equal((await service.retrieve(owner, { query: `purplewidget ${tag}`, filters: { metadata: { category: 'faq' } } })).length, 1);
 
+    const visibleChunk = (await service.retrieve(owner, { query: `purplewidget ${tag}`, filters: { documentIds: [visibleDoc.id] } }))[0];
+    await db.query('UPDATE leads SET deleted_at=now() WHERE workspace_id=$1 AND id=$2', [wsA, leadVisible]);
+    assert.deepEqual(await service.retrieve(owner, { query: `purplewidget ${tag}` }), []);
+    assert.deepEqual(await service.retrieve(agentContext, { query: `purplewidget ${tag}` }), []);
+    await assert.rejects(() => service.getDocument(owner, visibleDoc.id), error => error.code === 'KNOWLEDGE_NOT_FOUND');
+    await assert.rejects(() => service.getChunk(owner, visibleChunk.chunk_id), error => error.code === 'KNOWLEDGE_NOT_FOUND');
+    await db.query('UPDATE leads SET deleted_at=NULL WHERE workspace_id=$1 AND id=$2', [wsA, leadVisible]);
+    assert.equal((await service.retrieve(owner, { query: `purplewidget ${tag}` })).length, 1);
+
+    const hardDeleteDoc = await service.createDocument(owner, { sourceId: source.id, title: 'Lead hard-delete case', linkedLeadId: leadHidden });
+    await service.ingestDocument(owner, hardDeleteDoc.id, { idempotencyKey: `hard-delete-${tag}`, text: `harddeletewidget ${tag} private lead notes` });
+    await db.query('DELETE FROM leads WHERE workspace_id=$1 AND id=$2', [wsA, leadHidden]);
+    assert.deepEqual(await service.retrieve(owner, { query: `harddeletewidget ${tag}` }), []);
+    await assert.rejects(() => service.getDocument(owner, hardDeleteDoc.id), error => error.code === 'KNOWLEDGE_NOT_FOUND');
+
     const failingDoc = await service.createDocument(owner, { sourceId: source.id, title: 'Retry case' });
     const failingService = createKnowledgeService({ db, indexer: { indexVersion: async () => { throw new Error('deterministic index failure'); }, removeDocument: async () => {} } });
     const retryInput = { idempotencyKey: `retrying-${tag}`, text: `retrywidget ${tag} retryable content` };

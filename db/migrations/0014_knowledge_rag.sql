@@ -36,7 +36,7 @@ CREATE TABLE knowledge_documents (
   archived_at timestamptz,
   UNIQUE (workspace_id, id),
   FOREIGN KEY (workspace_id, source_id) REFERENCES knowledge_sources(workspace_id, id) ON DELETE CASCADE,
-  FOREIGN KEY (workspace_id, linked_lead_id) REFERENCES leads(workspace_id, id) ON DELETE SET NULL (linked_lead_id),
+  FOREIGN KEY (workspace_id, linked_lead_id) REFERENCES leads(workspace_id, id) ON DELETE CASCADE,
   FOREIGN KEY (workspace_id, created_by) REFERENCES workspace_members(workspace_id, user_id) ON DELETE SET NULL (created_by)
 );
 CREATE UNIQUE INDEX knowledge_documents_external_key_idx
