@@ -482,9 +482,6 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           if (request.method === 'GET' && !contactId) {
             requirePermission(context, 'crm:read');
             const q = url.searchParams.get('q')?.trim() ?? '';
-            const values = [workspaceId]; let filter = '';
-            if (q) { values.push('%' + q.replace(/[\\%_]/g, '\\\\        if (suffix === 'members/choices' && request.method === 'GET') {') + '%'); filter = ` AND (c.first_name ILIKE $2 ESCAPE '\\\\' OR c.last_name ILIKE $2 ESCAPE '\\\\' OR c.email ILIKE $2 ESCAPE '\\\\' OR c.phone ILIKE $2 ESCAPE '\\\\' OR co.name ILIKE $2 ESCAPE '\\\\')`; }
-            const pattern = '%' + q.replace(/[\\%_]/g, '\\\\$&') + '%';
             const pattern = '%' + q.replace(/[\\%_]/g, '\\\\$&') + '%';
             const result = await db.query(`SELECT c.*, co.name AS company_name FROM contacts c LEFT JOIN companies co ON co.id=c.company_id AND co.workspace_id=c.workspace_id WHERE c.workspace_id=$1 AND c.deleted_at IS NULL AND ($2 <> 'agent' OR c.owner_user_id=$3) AND ($4='' OR c.first_name ILIKE $5 ESCAPE '\\\\' OR c.last_name ILIKE $5 ESCAPE '\\\\' OR c.email ILIKE $5 ESCAPE '\\\\' OR c.phone ILIKE $5 ESCAPE '\\\\' OR co.name ILIKE $5 ESCAPE '\\\\') ORDER BY c.created_at DESC LIMIT 100`, [workspaceId, context.role, current.userId, q, pattern]);
             sendJson(response, 200, { data: result.rows }); return;
