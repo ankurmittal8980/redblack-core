@@ -1870,11 +1870,19 @@ export async function dispatchAutomationEvent(db, { workspaceId, eventType, lead
   );
   let leadContext = {};
   if (leadId) {
-    const lead = await db.query('SELECT status,score,temperature,budget,source_id,owner_user_id,location,opportunity_type,brand_project FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
-    if (lead.rows[0]) leadContext = { ...lead.rows[0], sourceId: lead.rows[0].source_id, ownerId: lead.rows[0].owner_user_id, opportunityType: lead.rows[0].opportunity_type, brandProject: lead.rows[0].brand_project };
+    const leadResult = await db.query('SELECT * FROM leads WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL', [workspaceId, leadId]);
+    if (leadResult.rows[0]) {
+      const customRows = await db.query(`SELECT d.field_key,v.value FROM lead_custom_fields v
+        JOIN custom_field_definitions d ON d.id=v.field_definition_id
+        WHERE d.workspace_id=$1 AND v.lead_id=$2`, [workspaceId, leadId]);
+      const row = leadResult.rows[0];
+      leadContext = { ...row, custom: Object.fromEntries(customRows.rows.map(item => [item.field_key, item.value])),
+        sourceId: row.source_id, ownerId: row.owner_user_id, opportunityType: row.opportunity_type, brandProject: row.brand_project };
+    }
   }
+  const eventContext = { ...leadContext, ...eventData, lead: leadContext, event: eventData };
   for (const automation of automations.rows) {
-    if (!automationMatches(automation.trigger_config ?? {}, { ...leadContext, ...eventData })) continue;
+    if (!automationMatches(automation.trigger_config ?? {}, eventContext)) continue;
     await queueAutomationRun(db, {
       workspaceId,
       automationId: automation.id,
@@ -1884,6 +1892,37 @@ export async function dispatchAutomationEvent(db, { workspaceId, eventType, lead
       test: false,
       eventData
     });
+  }
+  if (leadId) {
+    const waitingRuns = await db.query(
+      `SELECT id,metadata FROM automation_runs
+        WHERE workspace_id=$1 AND lead_id=$2 AND status='queued' AND metadata ? 'waitFor'`,
+      [workspaceId, leadId]
+    );
+    for (const waiting of waitingRuns.rows) {
+      const waitFor = waiting.metadata?.waitFor;
+      const matched = waitFor?.mode === 'event'
+        ? waitFor.eventType === eventType
+        : waitFor?.mode === 'condition' && automationCondition(waitFor.condition, eventContext);
+      if (!matched) continue;
+      const outcome = { waitedFor: waitFor.mode, eventType, timedOut: false };
+      const resumed = await db.query(
+        `UPDATE automation_runs
+            SET resume_at=now(),
+                metadata=(COALESCE(metadata,'{}'::jsonb) - 'waitFor') || jsonb_build_object('waitResult',$3::jsonb,'eventData',$4::jsonb)
+          WHERE workspace_id=$1 AND id=$2 AND status='queued' AND metadata ? 'waitFor'
+          RETURNING id`,
+        [workspaceId, waiting.id, JSON.stringify(outcome), JSON.stringify(eventData)]
+      );
+      if (resumed.rowCount) {
+        await db.query(
+          `UPDATE automation_action_runs
+              SET result=jsonb_set(COALESCE(result,'{}'::jsonb),'{output}',$4::jsonb,true) || jsonb_build_object('waitOutcome',$4::jsonb)
+            WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3`,
+          [workspaceId, waiting.id, Number(waitFor.position), JSON.stringify(outcome)]
+        );
+      }
+    }
   }
 }
 

@@ -13,9 +13,12 @@ const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, millise
 export async function claimRun() {
   return transaction(pool, async client => {
     const selected = await client.query(
-      `SELECT id, workspace_id, automation_id, version_id, lead_id, attempt_count, metadata
+`SELECT id, workspace_id, automation_id, version_id, lead_id, attempt_count, metadata, resume_at
          FROM automation_runs
-        WHERE (status='queued' AND COALESCE(resume_at, retry_after, created_at) <= now())
+        WHERE (status='queued' AND (
+                 (metadata->'waitFor' IS NULL AND COALESCE(resume_at, retry_after, created_at) <= now())
+                 OR (metadata->'waitFor' IS NOT NULL AND resume_at IS NOT NULL AND resume_at <= now())
+               ))
            OR (status='running' AND started_at < now() - interval '10 minutes')
         ORDER BY COALESCE(retry_after, created_at), id
         LIMIT 1 FOR UPDATE SKIP LOCKED`
@@ -23,9 +26,18 @@ export async function claimRun() {
     const run = selected.rows[0];
     if (!run) return null;
     const claimed = await client.query(
-      `UPDATE automation_runs SET status='running', started_at=now(), attempt_count=attempt_count+1, retry_after=NULL
-        WHERE id=$1 RETURNING *`, [run.id]
+`UPDATE automation_runs SET status='running', started_at=now(), attempt_count=attempt_count+1, retry_after=NULL, resume_at=NULL,
+          metadata=CASE WHEN $2::boolean THEN (COALESCE(metadata,'{}'::jsonb) - 'waitFor') || jsonb_build_object('waitResult',$3::jsonb) ELSE metadata END
+        WHERE id=$1 RETURNING *`,
+      [run.id, Boolean(run.metadata?.waitFor && run.resume_at && new Date(run.resume_at).getTime() <= Date.now()), JSON.stringify({ timedOut: true, mode: run.metadata?.waitFor?.mode ?? null })]
     );
+    if (run.metadata?.waitFor && run.resume_at && new Date(run.resume_at).getTime() <= Date.now()) {
+      const timeoutOutput = { timedOut: true, mode: run.metadata.waitFor.mode };
+      await client.query(`UPDATE automation_action_runs
+        SET result=jsonb_set(COALESCE(result,'{}'::jsonb),'{output}',$4::jsonb,true) || jsonb_build_object('waitOutcome',$4::jsonb)
+        WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3`,
+      [run.workspace_id, run.id, Number(run.metadata.waitFor.position), JSON.stringify(timeoutOutput)]);
+    }
     const version = await client.query(
       'SELECT definition FROM automation_versions WHERE workspace_id=$1 AND automation_id=$2 AND id=$3',
       [run.workspace_id, run.automation_id, run.version_id]
@@ -111,8 +123,25 @@ async function executeAction(run, action, position, nodeId = null) {
     await client.query("UPDATE automation_action_runs SET status='pending', result=$4::jsonb WHERE workspace_id=$1 AND automation_run_id=$2 AND position=$3", [run.workspace_id, run.id, position, JSON.stringify({ ...(nodeId ? { nodeId } : {}), input: { type: action.type, config } })]);
     let result = {};
     if (action.type === 'wait') {
-      await client.query("UPDATE automation_runs SET status='queued', resume_at=now()+($2::text || ' minutes')::interval WHERE id=$1", [run.id, String(config.minutes ?? 0)]);
-      result = { resumedAt: `in ${config.minutes ?? 0} minutes` };
+      const mode = config.mode ?? 'duration';
+      if (mode === 'duration') {
+        await client.query("UPDATE automation_runs SET status='queued', resume_at=now()+($2::text || ' minutes')::interval WHERE id=$1", [run.id, String(config.minutes ?? 0)]);
+        result = { waitingFor: 'duration', resumesInMinutes: config.minutes ?? 0 };
+      } else {
+        const waitFor = mode === 'event'
+          ? { mode, eventType: config.eventType, position }
+          : { mode, condition: config.condition, position };
+        const timeoutMinutes = config.timeoutMinutes == null ? null : Number(config.timeoutMinutes);
+        if (timeoutMinutes != null && (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 1 || timeoutMinutes > 525600)) throw new Error('Wait timeout must be between 1 and 525600 minutes.');
+        await client.query(
+          `UPDATE automation_runs SET status='queued',
+             resume_at=CASE WHEN $3::int IS NULL THEN NULL ELSE now()+($3::text || ' minutes')::interval END,
+             metadata=(COALESCE(metadata,'{}'::jsonb) - 'waitResult') || jsonb_build_object('waitFor',$2::jsonb)
+           WHERE id=$1`,
+          [run.id, JSON.stringify(waitFor), timeoutMinutes]
+        );
+        result = { waitingFor: mode, ...(mode === 'event' ? { eventType: config.eventType } : { condition: config.condition }), timeoutMinutes };
+      }
     } else if (action.type === 'create_task') {
       const owner = config.assignTo === 'owner' ? await client.query("SELECT user_id FROM workspace_members WHERE workspace_id=$1 AND role='owner' AND active=true ORDER BY joined_at LIMIT 1", [run.workspace_id]) : null;
       const assignedTo = owner?.rows[0]?.user_id ?? run.metadata?.requestedBy ?? null;
@@ -249,7 +278,7 @@ async function automationGraphContext(run) {
   const customRows = await pool.query(`SELECT d.field_key,v.value FROM lead_custom_fields v JOIN custom_field_definitions d ON d.id=v.field_definition_id WHERE d.workspace_id=$1 AND v.lead_id=$2`, [run.workspace_id, run.lead_id]);
   const custom = Object.fromEntries(customRows.rows.map(item => [item.field_key, item.value]));
   const lead = { ...row, custom, ownerId: row.owner_user_id, sourceId: row.source_id, score: Number(row.score), budget: row.budget == null ? null : Number(row.budget) };
-  return { lead, custom, event: run.metadata?.eventData ?? {} };
+  return { lead, custom, event: { ...(run.metadata?.eventData ?? {}), waitResult: run.metadata?.waitResult ?? null } };
 }
 
 async function recordGraphCondition(run, node, position, context) {
@@ -293,7 +322,9 @@ async function runGraph(run, graph) {
       }
       nextLabel = matched ? 'yes' : 'no';
     } else {
-      const action = node.type === 'wait' ? { type: 'wait', config: { minutes: node.minutes } } : node.action;
+      const action = node.type === 'wait'
+        ? { type: 'wait', config: { mode: node.mode ?? 'duration', minutes: node.minutes, eventType: node.eventType, condition: node.condition, timeoutMinutes: node.timeoutMinutes, position: positions.get(node.id) } }
+        : node.action;
       try {
         const outcome = await executeAction(run, action, positions.get(node.id), node.id);
         if (action.type === 'wait' && !outcome?.skipped) return;

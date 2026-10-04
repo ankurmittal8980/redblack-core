@@ -1,5 +1,13 @@
 const OPERATORS = new Set(['=', '!=', '>', '>=', '<', '<=', 'contains', 'does not contain', 'is empty', 'is not empty', 'in', 'not in']);
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,80}$/;
+const WAIT_EVENT_TYPES = new Set(['message.incoming','email.incoming','meeting.created','appointment.created','meeting.missed','appointment.missed','call.completed','lead.updated','lead.stage_changed','lead.score_changed']);
+
+function normalizeTimeout(value, nodeId) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const minutes = Number(value);
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 525600) throw new Error(`Wait node ${nodeId} timeout must be between 1 and 525600 minutes.`);
+  return minutes;
+}
 
 function validateCondition(condition, depth = 0, count = { value: 0 }) {
   if (depth > 8 || !condition || typeof condition !== 'object' || Array.isArray(condition)) throw new Error('Automation condition must be an object with at most 8 levels.');
@@ -35,9 +43,22 @@ export function normalizeAutomationGraph(graph, normalizeAction) {
       return { id: node.id, label: typeof node.label === 'string' ? node.label.slice(0,80) : node.id, type: 'action', action: normalizeAction(node.action) };
     }
     if (node.type === 'wait') {
-      const minutes = Number(node.minutes);
-      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 525600) throw new Error(`Wait node ${node.id} requires minutes from 1 to 525600.`);
-      return { id: node.id, label: typeof node.label === 'string' ? node.label.slice(0,80) : node.id, type: 'wait', minutes };
+      const mode = node.mode ?? 'duration';
+      const base = { id: node.id, label: typeof node.label === 'string' ? node.label.slice(0,80) : node.id, type: 'wait', mode };
+      if (mode === 'duration') {
+        const minutes = Number(node.minutes);
+        if (!Number.isInteger(minutes) || minutes < 1 || minutes > 525600) throw new Error(`Wait node ${node.id} requires minutes from 1 to 525600.`);
+        return { ...base, minutes };
+      }
+      const timeoutMinutes = normalizeTimeout(node.timeoutMinutes, node.id);
+      if (mode === 'event') {
+        if (!WAIT_EVENT_TYPES.has(node.eventType)) throw new Error(`Wait node ${node.id} requires a supported event type.`);
+        return { ...base, eventType: node.eventType, ...(timeoutMinutes ? { timeoutMinutes } : {}) };
+      }
+      if (mode === 'condition') {
+        return { ...base, condition: validateCondition(node.condition), ...(timeoutMinutes ? { timeoutMinutes } : {}) };
+      }
+      throw new Error(`Wait node ${node.id} has an unsupported wait mode.`);
     }
     if (node.type === 'end') return { id: node.id, label: typeof node.label === 'string' ? node.label.slice(0,80) : node.id, type: 'end' };
     throw new Error(`Unsupported graph node type: ${String(node.type)}.`);

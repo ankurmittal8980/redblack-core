@@ -653,3 +653,80 @@ test('PostgreSQL automation retry preserves completed steps and exposes step err
     await db.end();
   }
 });
+
+
+test('PostgreSQL automation waits resume once on matching events and lead conditions', { skip: !databaseUrl }, async () => {
+  process.env.DATABASE_URL = databaseUrl;
+  process.env.APP_ENV = 'test';
+  const [{ Pool }, { applyMigrations }, { normalizeAutomation, dispatchAutomationEvent }, worker] = await Promise.all([
+    import('pg'), import('../backend/src/migrate.js'), import('../backend/src/server.js'), import('../backend/src/worker.js')
+  ]);
+  const db = new Pool({ connectionString: databaseUrl });
+  const token = randomUUID();
+  try {
+    await applyMigrations(db);
+    const workspace = await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', [`Wait Test ${token.slice(0,8)}`, `wait-test-${token}`]);
+    const workspaceId = workspace.rows[0].id;
+    const user = await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`wait-test-${token}@example.test`, 'Wait Test Owner']);
+    await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceId, user.rows[0].id]);
+    const lead = await db.query("INSERT INTO leads(workspace_id,first_name,status) VALUES($1,'Wait Lead','Open') RETURNING id", [workspaceId]);
+    async function install(definition, key) {
+      const automation = await db.query("INSERT INTO automations(workspace_id,name,active,trigger_type,trigger_config,created_by) VALUES($1,$2,false,'manual','{}'::jsonb,$3) RETURNING id", [workspaceId, definition.name, user.rows[0].id]);
+      const version = await db.query('INSERT INTO automation_versions(workspace_id,automation_id,version_number,definition,created_by) VALUES($1,$2,1,$3::jsonb,$4) RETURNING id', [workspaceId, automation.rows[0].id, JSON.stringify(definition), user.rows[0].id]);
+      await db.query('UPDATE automations SET current_version_id=$3,active=true WHERE workspace_id=$1 AND id=$2', [workspaceId, automation.rows[0].id, version.rows[0].id]);
+      const run = await db.query("INSERT INTO automation_runs(workspace_id,automation_id,version_id,lead_id,status,idempotency_key,metadata) VALUES($1,$2,$3,$4,'running',$5,$6::jsonb) RETURNING *", [workspaceId, automation.rows[0].id, version.rows[0].id, lead.rows[0].id, key, JSON.stringify({ requestedBy: user.rows[0].id })]);
+      return { run: run.rows[0], definition };
+    }
+
+    const eventDefinition = normalizeAutomation({
+      name: 'Wait for message response', triggerType: 'manual', triggerConfig: {},
+      actions: [{ type: 'create_note', config: { title: 'Response received', body: 'Resumed from an incoming message.' } }],
+      graph: { version: 1, startNodeId: 'wait', nodes: [
+        { id: 'wait', type: 'wait', mode: 'event', eventType: 'message.incoming', timeoutMinutes: 30 },
+        { id: 'note', type: 'action', action: { type: 'create_note', config: { title: 'Response received', body: 'Resumed from an incoming message.' } } },
+        { id: 'end', type: 'end' }
+      ], edges: [{ from: 'wait', to: 'note', label: 'next' }, { from: 'note', to: 'end', label: 'next' }] }
+    });
+    const eventWait = await install(eventDefinition, `event-wait:${token}`);
+    await worker.runOne({ ...eventWait.run, definition: eventDefinition });
+    const suspendedEvent = await db.query('SELECT status,metadata FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, eventWait.run.id]);
+    assert.equal(suspendedEvent.rows[0].status, 'queued');
+    assert.equal(suspendedEvent.rows[0].metadata.waitFor.eventType, 'message.incoming');
+    await dispatchAutomationEvent(db, { workspaceId, eventType: 'lead.updated', leadId: lead.rows[0].id, eventId: `unmatched:${token}`, eventData: { fields: ['status'] } });
+    const stillWaiting = await db.query('SELECT metadata FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, eventWait.run.id]);
+    assert.equal(stillWaiting.rows[0].metadata.waitFor.eventType, 'message.incoming');
+    await dispatchAutomationEvent(db, { workspaceId, eventType: 'message.incoming', leadId: lead.rows[0].id, eventId: `response:${token}`, eventData: { messageId: token, channel: 'email' } });
+    await dispatchAutomationEvent(db, { workspaceId, eventType: 'message.incoming', leadId: lead.rows[0].id, eventId: `response:${token}`, eventData: { messageId: token, channel: 'email' } });
+    await db.query("UPDATE automation_runs SET status='running' WHERE workspace_id=$1 AND id=$2", [workspaceId, eventWait.run.id]);
+    const resumedEventRun = await db.query('SELECT * FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, eventWait.run.id]);
+    await worker.runOne({ ...resumedEventRun.rows[0], definition: eventDefinition });
+    const responseNote = await db.query("SELECT id FROM activities WHERE workspace_id=$1 AND lead_id=$2 AND type='note' AND title='Response received'", [workspaceId, lead.rows[0].id]);
+    assert.equal(responseNote.rowCount, 1);
+    const eventWaitStep = await db.query('SELECT result FROM automation_action_runs WHERE workspace_id=$1 AND automation_run_id=$2 AND position=0', [workspaceId, eventWait.run.id]);
+    assert.deepEqual(eventWaitStep.rows[0].result.waitOutcome, { waitedFor: 'event', eventType: 'message.incoming', timedOut: false });
+
+    const conditionDefinition = normalizeAutomation({
+      name: 'Wait for connected status', triggerType: 'manual', triggerConfig: {},
+      actions: [{ type: 'create_note', config: { title: 'Lead connected', body: 'Resumed after lead update.' } }],
+      graph: { version: 1, startNodeId: 'wait_condition', nodes: [
+        { id: 'wait_condition', type: 'wait', mode: 'condition', condition: { all: [{ field: 'lead.status', operator: '=', value: 'Connected' }] } },
+        { id: 'condition_note', type: 'action', action: { type: 'create_note', config: { title: 'Lead connected', body: 'Resumed after lead update.' } } },
+        { id: 'condition_end', type: 'end' }
+      ], edges: [{ from: 'wait_condition', to: 'condition_note', label: 'next' }, { from: 'condition_note', to: 'condition_end', label: 'next' }] }
+    });
+    const conditionWait = await install(conditionDefinition, `condition-wait:${token}`);
+    await worker.runOne({ ...conditionWait.run, definition: conditionDefinition });
+    await dispatchAutomationEvent(db, { workspaceId, eventType: 'lead.updated', leadId: lead.rows[0].id, eventId: `still-open:${token}`, eventData: { fields: ['notes'] } });
+    const conditionStillWaiting = await db.query('SELECT metadata FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, conditionWait.run.id]);
+    assert.equal(conditionStillWaiting.rows[0].metadata.waitFor.mode, 'condition');
+    await db.query("UPDATE leads SET status='Connected' WHERE workspace_id=$1 AND id=$2", [workspaceId, lead.rows[0].id]);
+    await dispatchAutomationEvent(db, { workspaceId, eventType: 'lead.updated', leadId: lead.rows[0].id, eventId: `connected:${token}`, eventData: { fields: ['status'] } });
+    await db.query("UPDATE automation_runs SET status='running' WHERE workspace_id=$1 AND id=$2", [workspaceId, conditionWait.run.id]);
+    const resumedConditionRun = await db.query('SELECT * FROM automation_runs WHERE workspace_id=$1 AND id=$2', [workspaceId, conditionWait.run.id]);
+    await worker.runOne({ ...resumedConditionRun.rows[0], definition: conditionDefinition });
+    const connectedNote = await db.query("SELECT id FROM activities WHERE workspace_id=$1 AND lead_id=$2 AND type='note' AND title='Lead connected'", [workspaceId, lead.rows[0].id]);
+    assert.equal(connectedNote.rowCount, 1);
+  } finally {
+    await db.end();
+  }
+});

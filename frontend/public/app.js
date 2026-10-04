@@ -358,7 +358,7 @@ async function renderCalling() {
 
 
 const automationActionTypes = ['create_task','create_activity','change_stage','create_message_draft','update_lead','assign_owner','create_note','invoke_ai','schedule_follow_up','send_communication','start_call'];
-const automationFields = ['lead.score','lead.status','lead.temperature','lead.budget','lead.location','lead.email','lead.phone','lead.owner_user_id','event.pipelineId','event.fromStageId','event.stageId','event.status','event.channel','event.provider','event.subject','event.direction','event.durationSeconds','event.messageId','event.callId','event.objectType'];
+const automationFields = ['lead.score','lead.status','lead.temperature','lead.budget','lead.location','lead.email','lead.phone','lead.owner_user_id','event.pipelineId','event.fromStageId','event.stageId','event.status','event.channel','event.provider','event.subject','event.direction','event.durationSeconds','event.messageId','event.callId','event.objectType','event.waitResult.timedOut'];
 const automationOperators = ['=','!=','>','>=','<','<=','contains','does not contain','is empty','is not empty','in','not in'];
 
 function automationDefaultConfig(type) {
@@ -374,6 +374,24 @@ function automationDefaultConfig(type) {
   if (type === 'change_stage') return { pipelineId: '', stageId: '' };
   if (type === 'assign_owner') return { userId: '' };
   return {};
+}
+
+const automationWaitEvents = [
+  ['message.incoming','Incoming message'],['email.incoming','Incoming email'],
+  ['meeting.created','Appointment created'],['appointment.created','Appointment booked'],
+  ['meeting.missed','Appointment missed'],['appointment.missed','Appointment missed'],
+  ['call.completed','Call completed'],['lead.updated','Lead updated'],
+  ['lead.stage_changed','Stage changed'],['lead.score_changed','Score changed']
+];
+function renderWaitConfig(node) {
+  const mode=node.mode??'duration';
+  if(mode==='condition'&&!node.condition)node.condition={all:[{field:'lead.status',operator:'=',value:'Connected'}]};
+  const modeOptions=[['duration','For a duration'],['event','Until an event'],['condition','Until a condition']];
+  let settings='';
+  if(mode==='duration')settings=`<label>Wait minutes<input type="number" min="1" max="525600" data-wait-key="minutes" data-node-id="${escapeHtml(node.id)}" value="${escapeHtml(node.minutes??60)}"></label>`;
+  else if(mode==='event')settings=`<label>Resume when<select data-wait-key="eventType" data-node-id="${escapeHtml(node.id)}">${automationWaitEvents.map(([value,label])=>`<option value="${value}" ${node.eventType===value?'selected':''}>${label}</option>`).join('')}</select></label><label>Timeout minutes (optional)<input type="number" min="1" max="525600" data-wait-key="timeoutMinutes" data-node-id="${escapeHtml(node.id)}" value="${escapeHtml(node.timeoutMinutes??'')}"></label>`;
+  else if(mode==='condition')settings=`${renderConditionTree(node.id,node.condition)}<label>Timeout minutes (optional)<input type="number" min="1" max="525600" data-wait-key="timeoutMinutes" data-node-id="${escapeHtml(node.id)}" value="${escapeHtml(node.timeoutMinutes??'')}"></label>`;
+  return `<label>Wait type<select data-wait-key="mode" data-node-id="${escapeHtml(node.id)}">${modeOptions.map(([value,label])=>`<option value="${value}" ${mode===value?'selected':''}>${label}</option>`).join('')}</select></label>${settings}`;
 }
 
 function newAutomationGraph() {
@@ -430,7 +448,7 @@ function renderAutomationActionConfig(node) {
 }
 function renderAutomationGraph() {
   const root=$('#automationSteps'); if(!root)return; const graph=ensureAutomationGraph();
-  root.innerHTML=`<div class="workflow-canvas" aria-label="Automation workflow graph">${graph.nodes.map((node,index)=>`<article class="pipeline-card workflow-node" draggable="true" data-automation-node="${escapeHtml(node.id)}"><div class="panel-header"><div><span class="badge">${node.type==='end'?'END':node.type==='condition'?'BRANCH':node.type==='wait'?'WAIT':'ACTION'}</span> <strong>${escapeHtml(node.label||node.id)}</strong></div>${node.type==='end'?'':`<button type="button" class="text-button" data-action="remove-automation-node" data-node-id="${escapeHtml(node.id)}">Remove</button>`}</div>${node.type==='end'?'':`<label>Step name<input data-node-label data-node-id="${escapeHtml(node.id)}" value="${escapeHtml(node.label||'')}" maxlength="80"></label>`}${node.type==='condition'?renderConditionTree(node.id,node.condition):node.type==='action'?`<label>Action<select data-automation-action-type data-node-id="${escapeHtml(node.id)}">${automationActionTypes.map(type=>`<option value="${type}" ${node.action.type===type?'selected':''}>${escapeHtml(type.replaceAll('_',' '))}</option>`).join('')}</select></label>${renderAutomationActionConfig(node)}`:node.type==='wait'?automationConfigField({id:node.id,action:{config:{minutes:node.minutes}}},'minutes','Wait minutes','number'):''}${node.type==='condition'?graphTargetSelect(node,'yes')+graphTargetSelect(node,'no'):node.type==='end'?'':graphTargetSelect(node,'next')}</article>`).join('<div class="workflow-edge" aria-hidden="true">↓</div>')}</div>`;
+  root.innerHTML=`<div class="workflow-canvas" aria-label="Automation workflow graph">${graph.nodes.map((node,index)=>`<article class="pipeline-card workflow-node" draggable="true" data-automation-node="${escapeHtml(node.id)}"><div class="panel-header"><div><span class="badge">${node.type==='end'?'END':node.type==='condition'?'BRANCH':node.type==='wait'?'WAIT':'ACTION'}</span> <strong>${escapeHtml(node.label||node.id)}</strong></div>${node.type==='end'?'':`<button type="button" class="text-button" data-action="remove-automation-node" data-node-id="${escapeHtml(node.id)}">Remove</button>`}</div>${node.type==='end'?'':`<label>Step name<input data-node-label data-node-id="${escapeHtml(node.id)}" value="${escapeHtml(node.label||'')}" maxlength="80"></label>`}${node.type==='condition'?renderConditionTree(node.id,node.condition):node.type==='action'?`<label>Action<select data-automation-action-type data-node-id="${escapeHtml(node.id)}">${automationActionTypes.map(type=>`<option value="${type}" ${node.action.type===type?'selected':''}>${escapeHtml(type.replaceAll('_',' '))}</option>`).join('')}</select></label>${renderAutomationActionConfig(node)}`:node.type==='wait'?renderWaitConfig(node):''}${node.type==='condition'?graphTargetSelect(node,'yes')+graphTargetSelect(node,'no'):node.type==='end'?'':graphTargetSelect(node,'next')}</article>`).join('<div class="workflow-edge" aria-hidden="true">↓</div>')}</div>`;
   root.ondragstart=event=>{const card=event.target.closest('[data-automation-node]');if(card)event.dataTransfer.setData('text/plain',card.dataset.automationNode);};
   root.ondragover=event=>event.preventDefault();
   root.ondrop=event=>{ event.preventDefault(); const from=event.dataTransfer.getData('text/plain'); const target=event.target.closest('[data-automation-node]'); if(!from||!target||from===target.dataset.automationNode)return; const nodes=graph.nodes.filter(node=>node.type!=='end'); const moving=nodes.findIndex(node=>node.id===from),to=nodes.findIndex(node=>node.id===target.dataset.automationNode); if(moving<0||to<0)return; const [node]=nodes.splice(moving,1); nodes.splice(to,0,node); graph.nodes=[...nodes,graph.nodes.find(node=>node.type==='end')]; renderAutomationGraph(); };
@@ -728,6 +746,13 @@ $('#viewRoot').addEventListener('click', async event => {
 });
 
 $('#viewRoot').addEventListener('change', async event => {
+  if (event.target.matches('[data-wait-key]')) {
+    const node=graphNode(event.target.dataset.nodeId),key=event.target.dataset.waitKey;
+    if(!node)return;
+    if(key==='mode') { node.mode=event.target.value; if(node.mode==='event'&&!node.eventType)node.eventType='message.incoming'; if(node.mode==='condition'&&!node.condition)node.condition={all:[{field:'lead.status',operator:'=',value:'Connected'}]}; if(node.mode==='duration'&&!node.minutes)node.minutes=60; renderAutomationGraph(); return; }
+    node[key]=event.target.value===''?null:(['minutes','timeoutMinutes'].includes(key)?Number(event.target.value):event.target.value);
+    return;
+  }
   if (event.target.matches('[data-graph-connection]')) { updateGraphConnection(event.target); return; }
   if (event.target.matches('[data-node-label]')) { const node=graphNode(event.target.dataset.nodeId); if(node)node.label=event.target.value; return; }
   if (event.target.matches('[data-automation-action-type]')) { const node=graphNode(event.target.dataset.nodeId); if(node){ node.action={type:event.target.value,config:automationDefaultConfig(event.target.value)}; renderAutomationGraph(); } return; }
