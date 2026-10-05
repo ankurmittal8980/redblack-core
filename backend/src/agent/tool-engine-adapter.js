@@ -1,1 +1,26 @@
-aW1wb3J0IHsgY3JlYXRlVG9vbEVuZ2luZSB9IGZyb20gJy4uL3Rvb2wtZW5naW5lLmpzJzsKCi8vIENhbm9uaWNhbCBicmlkZ2UgZnJvbSBBZ2VudFJ1bm5lcidzIHByb3ZpZGVyLW5ldXRyYWwgdG9vbCBjb250cmFjdCB0byB0aGUKLy8gZml4ZWQsIHNlcnZlci1vd25lZCBUb29sIEVuZ2luZSByZWdpc3RyeS4gVGhlIG1vZGVsIG5ldmVyIHN1cHBsaWVzIGNvbnRleHQuCmV4cG9ydCBmdW5jdGlvbiBjcmVhdGVBZ2VudFRvb2xFeGVjdXRvcih7IGRiLCBleGVjdXRvcnMgPSB7fSwgdmVyaWZ5QXBwcm92YWwgPSBudWxsLCB0aW1lb3V0TXMgfSA9IHt9KSB7CiAgY29uc3QgZW5naW5lID0gY3JlYXRlVG9vbEVuZ2luZSh7IGRiLCBleGVjdXRvcnMsIHZlcmlmeUFwcHJvdmFsLCB0aW1lb3V0TXMgfSk7CiAgcmV0dXJuIE9iamVjdC5mcmVlemUoewogICAgbGlzdFRvb2xzOiAoKSA9PiBlbmdpbmUubGlzdFRvb2xzKCksCiAgICBhc3luYyBleGVjdXRlKHsgcmVxdWVzdCwgYWN0b3IsIGF1dGhvcml6YXRpb24gfSkgewogICAgICBjb25zdCBjb250ZXh0ID0gewogICAgICAgIHdvcmtzcGFjZUlkOiBhY3Rvcj8ud29ya3NwYWNlSWQsCiAgICAgICAgYWN0b3JVc2VySWQ6IGFjdG9yPy51c2VySWQsCiAgICAgICAgcm9sZTogYWN0b3I/LnJvbGUsCiAgICAgICAgY29ycmVsYXRpb25JZDogYWN0b3I/LmNvcnJlbGF0aW9uSWQsCiAgICAgICAgcnVuSWQ6IGFjdG9yPy5ydW5JZCwKICAgICAgICBpZGVtcG90ZW5jeUtleTogcmVxdWVzdD8uaWRlbXBvdGVuY3lLZXkgPz8gYWN0b3I/LmlkZW1wb3RlbmN5S2V5LAogICAgICAgIGFwcHJvdmFsQ29udGV4dDogYXV0aG9yaXphdGlvbj8uYXBwcm92YWxDb250ZXh0ID8/IGFjdG9yPy5hcHByb3ZhbENvbnRleHQgPz8gbnVsbAogICAgICB9OwogICAgICBjb25zdCByZXN1bHQgPSBhd2FpdCBlbmdpbmUuZXhlY3V0ZSh7IHRvb2xOYW1lOiByZXF1ZXN0Py50b29sLCBpbnB1dDogcmVxdWVzdD8uaW5wdXQsIGNvbnRleHQgfSk7CiAgICAgIHJldHVybiByZXN1bHQub2sKICAgICAgICA/IHsgb2s6IHRydWUsIG91dHB1dDogcmVzdWx0LmRhdGEsIG1ldGFkYXRhOiB7IHRvb2xOYW1lOiByZXN1bHQudG9vbE5hbWUgfSB9CiAgICAgICAgOiB7IG9rOiBmYWxzZSwgZXJyb3I6IHJlc3VsdC5lcnJvcj8uY29kZSA/PyAnVE9PTF9GQUlMRUQnLCBtZXRhZGF0YTogcmVzdWx0IH07CiAgICB9CiAgfSk7Cn0K
+import { createToolEngine } from '../tool-engine.js';
+
+// Canonical bridge from AgentRunner's provider-neutral tool contract to the
+// fixed, server-owned Tool Engine registry. The model never supplies context.
+export function createAgentToolExecutor({ db, executors = {}, verifyApproval = null, timeoutMs } = {}) {
+  const engine = createToolEngine({ db, executors, verifyApproval, timeoutMs });
+  return Object.freeze({
+    listTools: () => engine.listTools(),
+    async execute({ request, actor, authorization }) {
+      const context = {
+        workspaceId: actor?.workspaceId,
+        actorUserId: actor?.userId,
+        role: actor?.role,
+        correlationId: actor?.correlationId,
+        runId: actor?.runId,
+        idempotencyKey: request?.idempotencyKey ?? actor?.idempotencyKey,
+        approvalContext: authorization?.approvalContext ?? actor?.approvalContext ?? null
+      };
+      const result = await engine.execute({ toolName: request?.tool, input: request?.input, context });
+      return result.ok
+        ? { ok: true, output: result.data, metadata: { toolName: result.toolName } }
+        : { ok: false, error: result.error?.code ?? 'TOOL_FAILED', metadata: result };
+    }
+  });
+}
+
