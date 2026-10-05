@@ -109,7 +109,7 @@ export async function handleCrmPlatform({db,context,suffix,request,url,body,repl
     let action='updated';
     if(method==='DELETE') {changes={deleted_at:new Date()};action='deleted';}
     else if(operation==='restore'){changes={deleted_at:null};action='restored';}
-    else {changes=input; if(!Object.keys(changes).length)throw new ValidationError('Provide at least one supported field.'); const merged={...old,...changes}; if(context.role==='agent'&&!merged[cfg.owner])fail(403,'FORBIDDEN','Agents must retain ownership of these records.'); if(entity==='contacts'&&!merged.first_name&&!merged.last_name)throw new ValidationError('A contact name is required.'); await references(client,context,merged,entity,Object.keys(changes)); if(entity==='deals'&&(input.stage_id!==undefined||input.pipeline_id!==undefined)) changes.status=merged.status;}
+    else {changes=input; if(!Object.keys(changes).length)throw new ValidationError('Provide at least one supported field.'); const merged={...old,...changes}; if(context.role==='agent'&&!merged[cfg.owner])fail(403,'FORBIDDEN','Agents must retain ownership of these records.'); if(entity==='contacts'&&!merged.first_name&&!merged.last_name)throw new ValidationError('A contact name is required.'); await references(client,context,merged,entity,Object.keys(changes).filter(key=>changes[key]!==old[key])); if(entity==='deals'&&(input.stage_id!==undefined||input.pipeline_id!==undefined||input.status!==undefined)) changes.status=merged.status;}
     const columns=Object.keys(changes); const values=[workspaceId,id,...Object.values(changes)];
     const updated=(await client.query(`UPDATE ${cfg.table} SET ${columns.map((column,i)=>`${column}=$${i+3}`).join(',')},updated_at=now() WHERE workspace_id=$1 AND id=$2 RETURNING *`,values)).rows[0];
     await history(client,context,cfg.type,id,action,request,{fields:columns,before:Object.fromEntries(columns.map(key=>[key,old[key]])),after:changes});return updated;
@@ -129,10 +129,10 @@ export async function handleCrmPlatform({db,context,suffix,request,url,body,repl
    if(existing)return {...existing,replayed:true};
    let companyId=input.companyId?uuid(input.companyId):null;
    if(companyId)await record(client,context,'companies',companyId);
-   else if(input.companyName||lead.company_name)companyId=(await insert(client,context,'companies',{name:requiredString(input.companyName??lead.company_name,'companyName'),owner_user_id:context.userId},request)).id;
+   else if(input.companyName||lead.company_name)companyId=(await insert(client,context,'companies',{name:requiredString(input.companyName||lead.company_name,'companyName'),owner_user_id:context.userId},request)).id;
    let contactId=input.contactId?uuid(input.contactId):null;
    if(contactId)await record(client,context,'contacts',contactId);
-   else contactId=(await insert(client,context,'contacts',{lead_id:id,company_id:companyId,first_name:lead.first_name,last_name:lead.last_name,email:lead.email,email_normalized:lead.email_normalized,phone:lead.phone,phone_normalized:lead.phone_normalized,owner_user_id:context.userId},request)).id;
+   else contactId=(await insert(client,context,'contacts',{lead_id:id,company_id:companyId,first_name:lead.first_name||(!lead.last_name?(lead.email||lead.phone||'Contact'):null),last_name:lead.last_name,email:lead.email,email_normalized:lead.email_normalized,phone:lead.phone,phone_normalized:lead.phone_normalized,owner_user_id:context.userId},request)).id;
    const dealData=crmInput('deals',{title:input.title??`${[lead.first_name,lead.last_name].filter(Boolean).join(' ')} opportunity`,pipelineId:input.pipelineId,stageId:input.stageId,value:input.value,expectedCloseDate:input.expectedCloseDate});
    const deal=await insert(client,context,'deals',{...dealData,lead_id:id,primary_contact_id:contactId,company_id:companyId,owner_user_id:context.userId},request);
    const converted=(await client.query('INSERT INTO lead_conversions(workspace_id,lead_id,contact_id,company_id,opportunity_id,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',[workspaceId,id,contactId,companyId,deal.id,context.userId])).rows[0];
@@ -186,3 +186,4 @@ export async function handleCrmPlatform({db,context,suffix,request,url,body,repl
  }
  return false;
 }
+
