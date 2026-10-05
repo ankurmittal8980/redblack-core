@@ -19,6 +19,8 @@ import { AIGateway } from './ai-gateway.js';
 import { OPENAPI_SPEC } from './openapi.js';
 import { normalizeAutomationGraph } from './automation-graph.js';
 import { parseCsv, serializeCsv } from './csv.js';
+import { createKnowledgeService } from './knowledge.js';
+import { createProductionAgentRuntime } from './agent/runtime.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const staticRoot = path.resolve(here, '../../frontend/public');
@@ -302,6 +304,8 @@ async function serveStatic(request, response, pathname) {
 function buildLeadCursor(row) { return makeCursor(row.created_at, row.id); }
 
 export function createRedBlackServer({ db = pool, communicationAdapters = communications, callingAdapters = calling } = {}) {
+  const knowledgeService = createKnowledgeService({ db });
+  const agentRuntime = createProductionAgentRuntime({ db, knowledgeService });
   const server = http.createServer(async (request, response) => {
     secureHeaders(response);
     const requestId = randomBytes(12).toString('hex');
@@ -1424,6 +1428,14 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
           const result = await gateway.complete({ workspaceId, actor: { userId: current.userId, role: current.role, workspaceId }, messages: input.messages, model: input.model ?? null, processing: input.processing ?? 'standard', idempotencyKey: request.headers['idempotency-key'] ?? undefined, allowFallback: input.allowFallback !== false, toolCalls: Boolean(input.toolCalls) });
           sendJson(response, 200, result); return;
         }
+        if (suffix === 'ai/agent/run' && request.method === 'POST') {
+          requirePermission(context, 'crm:read'); const input = await body();
+          const actor = await agentRuntime.resolveActor(workspaceId, { userId: current.userId });
+          const requestedTool = typeof input.tool === 'string' ? input.tool : '';
+          const goal = JSON.stringify({ tool: requestedTool, input: input.input && typeof input.input === 'object' ? input.input : {}, impact: input.impact ?? 'read', rationale: typeof input.rationale === 'string' ? input.rationale.slice(0, 1000) : '' });
+          const run = await agentRuntime.agent.start({ workspaceId, actor, goal, idempotencyKey: request.headers['idempotency-key'] ?? undefined, definition: { id: 'core-agent', name: 'Core CRM Agent', allowedTools: requestedTool ? [requestedTool] : [], maxSteps: 2, maxRetries: 1 } });
+          sendJson(response, 200, run); return;
+        }
         if (suffix === 'automations/install-defaults' && request.method === 'POST') {
           requirePermission(context, 'automation:manage');
           await installDefaultAutomations(db, workspaceId, current.userId);
@@ -1938,5 +1950,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const shutdown = async () => { server.close(); await closeDatabase(); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 }
+
 
 

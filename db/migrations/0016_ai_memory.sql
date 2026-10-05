@@ -1,1 +1,66 @@
--- Provider-neutral AI memory. 0014 is intentionally reserved for Task 5 because-- parallel AI tasks may occupy 0012/0013 before integration onto the shared branch.CREATE TABLE IF NOT EXISTS ai_memory_records (  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,  actor_user_id uuid,  scope_user_id uuid,  memory_type text NOT NULL CHECK (memory_type IN ('conversation','customer_context','knowledge_reference','agent_execution')),  durability text NOT NULL CHECK (durability IN ('working','durable')),  category text NOT NULL CHECK (length(category) BETWEEN 1 AND 80),  content text,  entity_type text,  entity_id uuid,  reference_type text,  reference_id text,  session_id text,  execution_id text,  source_type text NOT NULL,  source_ref text,  confidence numeric(4,3) CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','superseded')),  idempotency_key text,  expires_at timestamptz,  created_at timestamptz NOT NULL DEFAULT now(),  updated_at timestamptz NOT NULL DEFAULT now(),  CONSTRAINT ai_memory_actor_workspace_member_fk    FOREIGN KEY (workspace_id, actor_user_id)    REFERENCES workspace_members(workspace_id, user_id)    ON DELETE SET NULL (actor_user_id),  CONSTRAINT ai_memory_scope_workspace_member_fk    FOREIGN KEY (workspace_id, scope_user_id)    REFERENCES workspace_members(workspace_id, user_id)    ON DELETE CASCADE,  CHECK (memory_type <> 'conversation' OR session_id IS NOT NULL),  CHECK (memory_type <> 'customer_context' OR (entity_type IS NOT NULL AND entity_id IS NOT NULL)),  CHECK (memory_type <> 'knowledge_reference' OR (reference_type IS NOT NULL AND reference_id IS NOT NULL AND content IS NULL)),  CHECK (memory_type <> 'agent_execution' OR execution_id IS NOT NULL),  CHECK (durability <> 'working' OR expires_at IS NOT NULL));CREATE UNIQUE INDEX IF NOT EXISTS ai_memory_workspace_idempotency_key  ON ai_memory_records(workspace_id, idempotency_key)  WHERE idempotency_key IS NOT NULL;CREATE INDEX IF NOT EXISTS ai_memory_workspace_user_scope_idx  ON ai_memory_records(workspace_id, scope_user_id, updated_at DESC)  WHERE scope_user_id IS NOT NULL;CREATE INDEX IF NOT EXISTS ai_memory_workspace_actor_idx  ON ai_memory_records(workspace_id, actor_user_id, memory_type, updated_at DESC)  WHERE actor_user_id IS NOT NULL;CREATE INDEX IF NOT EXISTS ai_memory_workspace_type_updated_idx  ON ai_memory_records(workspace_id, memory_type, updated_at DESC, id);CREATE INDEX IF NOT EXISTS ai_memory_workspace_entity_idx  ON ai_memory_records(workspace_id, entity_type, entity_id, updated_at DESC)  WHERE entity_id IS NOT NULL;CREATE INDEX IF NOT EXISTS ai_memory_workspace_session_idx  ON ai_memory_records(workspace_id, session_id, updated_at DESC)  WHERE session_id IS NOT NULL;CREATE INDEX IF NOT EXISTS ai_memory_workspace_execution_idx  ON ai_memory_records(workspace_id, execution_id, updated_at DESC)  WHERE execution_id IS NOT NULL;CREATE INDEX IF NOT EXISTS ai_memory_expiry_idx  ON ai_memory_records(workspace_id, expires_at)  WHERE expires_at IS NOT NULL;
+-- Provider-neutral AI memory. 0014 is intentionally reserved for Task 5 because
+-- parallel AI tasks may occupy 0012/0013 before integration onto the shared branch.
+
+CREATE TABLE IF NOT EXISTS ai_memory_records (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id uuid NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  actor_user_id uuid,
+  scope_user_id uuid,
+  memory_type text NOT NULL CHECK (memory_type IN ('conversation','customer_context','knowledge_reference','agent_execution')),
+  durability text NOT NULL CHECK (durability IN ('working','durable')),
+  category text NOT NULL CHECK (length(category) BETWEEN 1 AND 80),
+  content text,
+  entity_type text,
+  entity_id uuid,
+  reference_type text,
+  reference_id text,
+  session_id text,
+  execution_id text,
+  source_type text NOT NULL,
+  source_ref text,
+  confidence numeric(4,3) CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','superseded')),
+  idempotency_key text,
+  expires_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT ai_memory_actor_workspace_member_fk
+    FOREIGN KEY (workspace_id, actor_user_id)
+    REFERENCES workspace_members(workspace_id, user_id)
+    ON DELETE SET NULL (actor_user_id),
+  CONSTRAINT ai_memory_scope_workspace_member_fk
+    FOREIGN KEY (workspace_id, scope_user_id)
+    REFERENCES workspace_members(workspace_id, user_id)
+    ON DELETE CASCADE,
+  CHECK (memory_type <> 'conversation' OR session_id IS NOT NULL),
+  CHECK (memory_type <> 'customer_context' OR (entity_type IS NOT NULL AND entity_id IS NOT NULL)),
+  CHECK (memory_type <> 'knowledge_reference' OR (reference_type IS NOT NULL AND reference_id IS NOT NULL AND content IS NULL)),
+  CHECK (memory_type <> 'agent_execution' OR execution_id IS NOT NULL),
+  CHECK (durability <> 'working' OR expires_at IS NOT NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ai_memory_workspace_idempotency_key
+  ON ai_memory_records(workspace_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ai_memory_workspace_user_scope_idx
+  ON ai_memory_records(workspace_id, scope_user_id, updated_at DESC)
+  WHERE scope_user_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ai_memory_workspace_actor_idx
+  ON ai_memory_records(workspace_id, actor_user_id, memory_type, updated_at DESC)
+  WHERE actor_user_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS ai_memory_workspace_type_updated_idx
+  ON ai_memory_records(workspace_id, memory_type, updated_at DESC, id);
+CREATE INDEX IF NOT EXISTS ai_memory_workspace_entity_idx
+  ON ai_memory_records(workspace_id, entity_type, entity_id, updated_at DESC)
+  WHERE entity_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ai_memory_workspace_session_idx
+  ON ai_memory_records(workspace_id, session_id, updated_at DESC)
+  WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ai_memory_workspace_execution_idx
+  ON ai_memory_records(workspace_id, execution_id, updated_at DESC)
+  WHERE execution_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ai_memory_expiry_idx
+  ON ai_memory_records(workspace_id, expires_at)
+  WHERE expires_at IS NOT NULL;
