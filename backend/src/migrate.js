@@ -7,21 +7,27 @@ import { pool, closeDatabase } from './db.js';
 const migrationDirectory = fileURLToPath(new URL('../../db/migrations/', import.meta.url));
 
 export async function applyMigrations(db = pool) {
-  await db.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
+  // Hold one session advisory lock across table creation and every migration.
+  // The previous per-migration transaction lock still allowed two fresh
+  // processes to race while creating the enum types in 0001.
+  const lockClient = await db.connect();
+  await lockClient.query('SELECT pg_advisory_lock(hashtext($1))', ['redblack-core-schema-migrations']);
+  try {
+   await lockClient.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version text PRIMARY KEY,
     checksum char(64) NOT NULL,
     applied_at timestamptz NOT NULL DEFAULT now()
-  )`);
-  const files = (await readdir(migrationDirectory)).filter(name => /^\d+_[a-z0-9_]+\.sql$/.test(name)).sort();
-  for (const name of files) {
+   )`);
+   const files = (await readdir(migrationDirectory)).filter(name => /^\d+_[a-z0-9_]+\.sql$/.test(name)).sort();
+   for (const name of files) {
     const sql = await readFile(path.join(migrationDirectory, name), 'utf8');
     const checksum = createHash('sha256').update(sql).digest('hex');
-    const prior = await db.query('SELECT checksum FROM schema_migrations WHERE version = $1', [name]);
+    const prior = await lockClient.query('SELECT checksum FROM schema_migrations WHERE version = $1', [name]);
     if (prior.rows[0]) {
       if (prior.rows[0].checksum.trim() !== checksum) throw new Error(`Applied migration ${name} has changed; add a new migration instead.`);
       continue;
     }
-    const client = await db.connect();
+    const client = lockClient;
     try {
       await client.query('BEGIN');
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', ['redblack-core-schema-migrations']);
@@ -37,9 +43,11 @@ export async function applyMigrations(db = pool) {
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;
-    } finally {
-      client.release();
-    }
+    } finally { /* lockClient is released once after the complete migration set */ }
+   }
+  } finally {
+   await lockClient.query('SELECT pg_advisory_unlock(hashtext($1))', ['redblack-core-schema-migrations']).catch(() => {});
+   lockClient.release();
   }
 }
 
@@ -58,4 +66,6 @@ if (invokedAsScript) {
     process.exitCode = 1;
   }
 }
+
+
 
