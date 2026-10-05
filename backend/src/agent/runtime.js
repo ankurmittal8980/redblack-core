@@ -30,10 +30,14 @@ export function createProductionAgentRuntime({ db, knowledgeService = null, plan
     assignLead: async ({ db: cx, context, input }) => (await cx.query('UPDATE lead_assignments SET unassigned_at=now() WHERE workspace_id=$1 AND lead_id=$2 AND unassigned_at IS NULL; INSERT INTO lead_assignments(workspace_id,lead_id,user_id) VALUES($1,$2,$3) RETURNING lead_id,user_id', [context.workspaceId, input.leadId, input.assigneeId])).rows.at(-1),
     createMessageDraft: async ({ db: cx, context, input }) => (await cx.query('INSERT INTO messages(workspace_id,lead_id,channel,direction,status,subject,body,created_by) VALUES($1,$2,$3,\'outbound\',\'draft\',$4,$5,$6,$7) RETURNING id,lead_id,channel,status,subject,body,created_at', [context.workspaceId, input.leadId, input.channel, input.subject ?? null, input.body, context.actorUserId])).rows[0]
   };
-  const toolExecutor = createAgentToolExecutor({ db, executors });
+  const toolExecutor = createAgentToolExecutor({ db, executors, verifyApproval: async ({ approvalContext, context }) => {
+    if (!approvalContext?.approvalId || approvalContext.workspaceId !== context.workspaceId) return false;
+    const approved = await db.query('SELECT 1 FROM workspace_members WHERE workspace_id=$1 AND user_id=$2 AND active=true AND role IN (\'owner\',\'admin\',\'manager\')', [context.workspaceId, approvalContext.approverId]);
+    return approved.rowCount > 0;
+  } });
   const memoryStore = new PostgresMemoryStore(db);
   const memory = createMemoryService({ store: memoryStore, authorizeEntity: async () => true });
-  const agent = new AgentRunner({ store: new InMemoryAgentRunStore(), planner: planner ?? { next: async view => { if (view.stepCount === 0) { try { return { type: 'tool', request: JSON.parse(view.goal) }; } catch { return { type: 'finish', result: null }; } } return { type: 'finish', result: view.observations.at(-1)?.observation ?? null }; } }, toolExecutor, authorizeTool: async ({ request, actor }) => ({ allowed: Boolean(actor?.userId && actor?.workspaceId && request?.tool) }), memoryStore: { getContext: args => memory.buildMemoryContext({ ...args, actor: args.actor, maxChars: 12000 }) }, knowledgeRetriever: knowledgeService ? { retrieve: args => knowledgeService.retrieve(args.actor, { query: args.goal, topK: 10 }) } : null });
+  const agent = new AgentRunner({ store: new InMemoryAgentRunStore(), planner: planner ?? { next: async view => { if (view.stepCount === 0) { try { return { type: 'tool', request: JSON.parse(view.goal) }; } catch { return { type: 'finish', result: null }; } } return { type: 'finish', result: view.observations.at(-1)?.observation ?? null }; } }, toolExecutor, authorizeTool: async ({ request, actor, approval }) => ({ allowed: Boolean(actor?.userId && actor?.workspaceId && request?.tool), approvalContext: approval ? { approvalId: `${approval.actor?.userId ?? ''}:${approval.decidedAt ?? ''}`, approverId: approval.actor?.userId, workspaceId: actor.workspaceId } : null }), memoryStore: { getContext: args => memory.buildMemoryContext({ ...args, actor: args.actor, maxChars: 12000 }) }, knowledgeRetriever: knowledgeService ? { retrieve: args => knowledgeService.retrieve(args.actor, { query: args.goal, topK: 10 }) } : null });
   return Object.freeze({ agent, toolExecutor, resolveActor: (workspaceId, actor) => actorFromDb(db, workspaceId, actor) });
 }
 
