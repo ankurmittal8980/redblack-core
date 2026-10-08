@@ -28,7 +28,7 @@ test('browser acceptance: operational CRM screens, conversion, editing, read-onl
   await context.addCookies([{name:'rb_session',value:session.token,url:origin,httpOnly:true},{name:'rb_csrf',value:session.csrf,url:origin}]);
   const page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));await page.goto(`${origin}/app/`);await page.locator('#appView').waitFor({state:'visible'});return {page,context};
  }
- async function navigate(page,view) {await page.locator(`#mainNav [data-view="${view}"]`).click();await page.locator('#viewRoot h1').waitFor();await page.waitForLoadState('networkidle');assert.ok(!await page.locator('#viewRoot').innerText().then(text=>text.includes('We could not load')));}
+ async function navigate(page,view) {await page.locator(`#mainNav [data-view="${view}"]`).click();await page.locator('#viewRoot h1').waitFor();await page.waitForLoadState('networkidle');const content=await page.locator('#viewRoot').innerText();assert.ok(!content.includes('We could not load'),`${view} failed: ${content}`);}
  async function assertLeadDirectory(role,page) {
   await navigate(page,'leads');
   const leadRow=page.locator('tr').filter({hasText:'Browser Customer'});
