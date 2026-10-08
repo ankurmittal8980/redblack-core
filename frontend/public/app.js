@@ -194,8 +194,9 @@ async function renderLeads() {
   if (appState.leadStatus) exportParams.set('status', appState.leadStatus);
   const exportQuery = exportParams.toString();
   const exportHref = `${apiRoot}${workspacePath('leads/export')}${exportQuery ? `?${exportQuery}` : ''}`;
-  const memberPromise = ['owner','admin','manager'].includes(appState.role) ? api(workspacePath('members')) : Promise.resolve({data:[]});
+  const memberPromise = ['owner','admin','manager'].includes(appState.role) ? api(workspacePath('members/choices')) : Promise.resolve({data:[]});
   const [result, fieldDefs, tagCatalog, sources, savedViews, pipelines, members, layouts] = await Promise.all([api(`${workspacePath('leads')}?${params}`), api(`${workspacePath('custom-fields')}?entityType=lead`), api(workspacePath('tags')), api(workspacePath('lead-sources')), api(`${workspacePath('saved-views')}?entityType=lead`), api(workspacePath('pipelines')), memberPromise, api(`${workspacePath('layouts')}?entityType=lead`)]);
+  if (members.data) members.data = members.data.map(member => ({ ...member, active: member.active ?? true }));
   const leadColumns = layouts.data?.find(layout => layout.active)?.config?.columns ?? ['project','status','budget','nextAction'];
   const leadColumnLabels = {project:'Project / opportunity',status:'Temperature / status',budget:'Budget',nextAction:'Next action',owner:'Owner',score:'Score',location:'Location'};
   const createAllowed = ['owner','admin','manager','agent'].includes(appState.role);
@@ -217,7 +218,7 @@ async function renderLeads() {
       <div class="table-wrap"><table><thead><tr><th>Lead</th>${leadColumns.map(column=>`<th>${escapeHtml(leadColumnLabels[column]||column)}</th>`).join('')}<th></th></tr></thead><tbody>${renderLeadRows(result.data ?? [], leadColumns)}</tbody></table></div>
       <div class="pagination"><button class="button button-secondary button-small" data-action="next-leads" ${result.nextCursor ? '' : 'disabled'} data-cursor="${escapeHtml(result.nextCursor ?? '')}">Load more</button></div></div></section>`);
   if (!createAllowed) {
-    document.querySelectorAll('#savedViewForm,[data-action="select-all-leads"],[data-action="bulk-trash"],[data-action="select-lead"],#bulkStatus,#bulkStage,#bulkTag,#bulkOwner').forEach(control => {
+    document.querySelectorAll('[data-action="select-all-leads"],[data-action="bulk-trash"],[data-action="select-lead"],#bulkStatus,#bulkStage,#bulkTag,#bulkOwner').forEach(control => {
       if (control.matches('[data-action="select-all-leads"]')) control.closest('label')?.remove();
       else control.remove();
     });

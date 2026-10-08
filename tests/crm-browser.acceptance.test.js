@@ -35,7 +35,9 @@ test('browser acceptance: operational CRM screens, conversion, editing, read-onl
   assert.equal(await leadRow.count(),1);
   if(role==='agent') assert.equal(await page.getByText('Unassigned Lead',{exact:false}).count(),0);
   if(['reporting','service'].includes(role)) {
-   for(const selector of ['#savedViewForm','[data-action="select-all-leads"]','[data-action="select-lead"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag','#bulkOwner']) assert.equal(await page.locator(selector).count(),0,`${role} should not see ${selector}`);
+   for(const selector of ['[data-action="select-all-leads"]','[data-action="select-lead"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag','#bulkOwner']) assert.equal(await page.locator(selector).count(),0,`${role} should not see ${selector}`);
+   assert.equal(await page.locator('#savedViewForm').count(),1);
+   assert.equal(await page.getByRole('button',{name:'Save view',exact:true}).count(),1);
    assert.equal(await page.getByRole('button',{name:/New lead/}).count(),0);
    assert.equal(await page.getByRole('button',{name:'Import CSV',exact:true}).count(),0);
    assert.equal(await page.getByRole('link',{name:'Export CSV',exact:true}).count(),1);
