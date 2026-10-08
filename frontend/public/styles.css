@@ -170,6 +170,17 @@ tbody tr:hover { background: #fdfbfb; }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-grid { grid-template-columns: 1fr; }
 }
+
+.workflow-canvas { display: grid; gap: 10px; }
+.workflow-node { margin: 0; padding: 14px; border-left: 4px solid var(--red); }
+.workflow-node > .panel-header { min-height: auto; padding: 0 0 10px; border: 0; }
+.workflow-node > label { display: grid; gap: 7px; margin: 8px 0; color: #36393c; font-size: .79rem; font-weight: 650; }
+.workflow-edge { text-align: center; color: var(--quiet); font-size: 1.1rem; line-height: 1; }
+.workflow-condition-group { display: grid; gap: 9px; margin: 10px 0 10px 14px; padding: 12px; border-left: 2px solid var(--line); border-radius: 0 8px 8px 0; background: var(--off-white); }
+.workflow-condition-rule { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(130px, .7fr) minmax(160px, 1fr) auto; gap: 8px; align-items: end; }
+.workflow-connection { display: flex !important; align-items: center; gap: 9px !important; margin-top: 10px; color: var(--ink); font-size: .75rem !important; font-weight: 700 !important; }
+.workflow-connection select { max-width: 420px; }
+
 @media (max-width: 760px) {
   .app-shell { display: block; }
   .sidebar { position: sticky; z-index: 10; width: 100%; height: auto; padding: 12px 13px 10px; }
@@ -195,6 +206,8 @@ tbody tr:hover { background: #fdfbfb; }
   .toolbar input { flex: 1 1 100%; max-width: none; }
   .toolbar select { flex: 1; max-width: none; }
   .field-grid { grid-template-columns: 1fr; }
+  .workflow-condition-rule { grid-template-columns: 1fr; }
+  .workflow-connection { align-items: stretch !important; flex-direction: column; }
   .field-grid .span-2 { grid-column: auto; }
   .key-value { grid-template-columns: 120px minmax(0,1fr); }
 }

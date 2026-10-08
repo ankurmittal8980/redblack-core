@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCsv } from '../backend/src/csv.js';
+import { parseCsv, serializeCsv } from '../backend/src/csv.js';
 import { mapLegacyLead, normalizeLegacyStatus, parseLegacyBudget, parseLegacyDate } from '../backend/src/legacy-map.js';
 import { calculateEstimate } from '../backend/src/pricing.js';
 import { hasPermission, visibleLeadPredicate } from '../backend/src/rbac.js';
@@ -16,6 +16,17 @@ test('CSV reader handles BOM, escaped quotes, commas and multiline cells', () =>
   assert.equal(parsed.records[0].values.Notes, 'called "twice"\nand emailed');
   assert.throws(() => parseCsv('a,a\n1,2'), /unique/);
   assert.throws(() => parseCsv('a\n"not closed'), /unterminated/);
+});
+
+test('CSV parser keeps physical row numbers and rejects case-insensitive duplicate headings', () => {
+  const parsed = parseCsv('Name,Email\r\nMira,mira@example.com\r\n\r\nNo name,invalid\n');
+  assert.deepEqual(parsed.records.map(record => record.rowNumber), [2, 4]);
+  assert.throws(() => parseCsv('Email,email\na,b'), /unique/);
+});
+
+test('CSV serializer adds an Excel-friendly BOM, escapes cells and neutralizes formulas', () => {
+  const csv = serializeCsv(['Name','Notes'], [['=1+1','two,\nlines'], ['Mira','a "quote"']]);
+  assert.equal(csv, '\uFEFFName,Notes\r\n\'=1+1,"two,\nlines"\r\nMira,"a ""quote"""\r\n');
 });
 
 test('legacy conversion preserves source values while making explicit status and date choices', () => {
