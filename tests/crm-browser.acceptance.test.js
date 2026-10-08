@@ -14,6 +14,7 @@ test('browser acceptance: operational CRM screens, conversion, editing, read-onl
  }
  const lead=(await db.query("INSERT INTO leads(workspace_id,first_name,last_name,email) VALUES($1,'Browser','Customer','browser@example.com') RETURNING id",[workspaceId])).rows[0].id;
  await db.query('INSERT INTO lead_assignments(workspace_id,lead_id,user_id) VALUES($1,$2,$3)',[workspaceId,lead,users.agent]);
+ await db.query("INSERT INTO leads(workspace_id,first_name,last_name) VALUES($1,'Unassigned','Lead')",[workspaceId]);
  const company=(await db.query("INSERT INTO companies(workspace_id,name,owner_user_id) VALUES($1,'Browser Company',$2) RETURNING id",[workspaceId,users.owner])).rows[0].id;
  const contact=(await db.query("INSERT INTO contacts(workspace_id,company_id,lead_id,owner_user_id,first_name,last_name) VALUES($1,$2,$3,$4,'Browser','Contact') RETURNING id",[workspaceId,company,lead,users.owner])).rows[0].id;
  const pipeline=(await db.query("INSERT INTO pipelines(workspace_id,name,slug) VALUES($1,'Browser Pipeline',$2) RETURNING id",[workspaceId,`browser-pipeline-${key}`])).rows[0].id;
@@ -42,8 +43,26 @@ test('browser acceptance: operational CRM screens, conversion, editing, read-onl
   await navigate(page,'communications');await page.getByRole('heading',{name:'Unified Inbox',exact:true}).waitFor();await context.close();
   for(const role of ['admin','manager','agent','reporting','service']) {
    const {page:p,context:c}=await sessionPage(role,role==='agent');
-   for(const view of ['contacts','companies','deals','tickets','search','notifications','communications']) {
+   for(const view of ['leads','contacts','companies','deals','tickets','search','notifications','communications']) {
     await navigate(p,view);
+    if(view==='leads') {
+     const leadRow=p.locator('tr').filter({hasText:'Browser Customer'});
+     assert.equal(await leadRow.count(),1);
+     if(role==='agent') assert.equal(await p.getByText('Unassigned Lead',{exact:false}).count(),0);
+     if(['reporting','service'].includes(role)) {
+      for(const selector of ['#savedViewForm','[data-action="select-all-leads"]','[data-action="select-lead"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag','#bulkOwner']) assert.equal(await p.locator(selector).count(),0,`${role} should not see ${selector}`);
+      assert.equal(await p.getByRole('button',{name:/New lead/}).count(),0);
+      assert.equal(await p.getByRole('button',{name:'Import CSV',exact:true}).count(),0);
+      assert.equal(await p.getByRole('link',{name:'Export CSV',exact:true}).count(),1);
+      assert.equal(await p.locator('#leadSearch').count(),1);
+      assert.equal(await p.locator('#leadStatus').count(),1);
+      await leadRow.getByRole('button',{name:'Open',exact:true}).click();
+      await p.getByRole('heading',{name:'Browser Customer',exact:true}).waitFor();
+      assert.equal(await p.getByRole('button',{name:'Edit',exact:true}).count(),0);
+      assert.equal(await p.getByRole('button',{name:'Save changes',exact:true}).count(),0);
+      await navigate(p,'leads');
+     }
+    }
     if(['reporting','service'].includes(role)) {assert.equal(await p.getByRole('button',{name:'Create',exact:true}).count(),0);assert.equal(await p.getByRole('button',{name:'Save draft',exact:true}).count(),0);}
    }
    await c.close();

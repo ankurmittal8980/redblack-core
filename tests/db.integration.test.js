@@ -105,7 +105,9 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   const workspaceA = (await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', ['Bulk API A', `bulk-api-a-${suffix}`])).rows[0].id;
   const workspaceB = (await db.query('INSERT INTO workspaces(name,slug) VALUES($1,$2) RETURNING id', ['Bulk API B', `bulk-api-b-${suffix}`])).rows[0].id;
   const userId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`bulk-api-${suffix}@example.com`, 'Bulk API Owner'])).rows[0].id;
+  const reportingId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`bulk-reporting-${suffix}@example.com`, 'Bulk API Reporting'])).rows[0].id;
   await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceA, userId]);
+  await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'reporting')", [workspaceA, reportingId]);
   const leadA = (await db.query("INSERT INTO leads(workspace_id,first_name) VALUES($1,'Workspace A Lead') RETURNING id", [workspaceA])).rows[0].id;
   const leadB = (await db.query("INSERT INTO leads(workspace_id,first_name) VALUES($1,'Workspace B Lead') RETURNING id", [workspaceB])).rows[0].id;
   const oldTag = (await db.query("INSERT INTO tags(workspace_id,name) VALUES($1,'Old') RETURNING id", [workspaceA])).rows[0].id;
@@ -120,6 +122,7 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   const assignmentRuleId = (await db.query("INSERT INTO crm_assignment_rules(workspace_id,name,conditions,strategy,config,active) VALUES($1,'Test assignment','{}'::jsonb,'unassigned','{}'::jsonb,true) RETURNING id", [workspaceA])).rows[0].id;
   const scoringRuleId = (await db.query("INSERT INTO crm_scoring_rules(workspace_id,name,conditions,score_delta,active) VALUES($1,'Test score','{}'::jsonb,10,true) RETURNING id", [workspaceA])).rows[0].id;
   const session = await createSession(db, { userId, workspaceId: workspaceA });
+  const reportingSession = await createSession(db, { userId: reportingId, workspaceId: workspaceA });
   const server = createRedBlackServer({ db });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
@@ -128,6 +131,11 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
     'content-type': 'application/json',
     cookie: `rb_session=${encodeURIComponent(session.token)}; rb_csrf=${encodeURIComponent(session.csrf)}`,
     'x-csrf-token': session.csrf
+  };
+  const reportingHeaders = {
+    'content-type': 'application/json',
+    cookie: `rb_session=${encodeURIComponent(reportingSession.token)}; rb_csrf=${encodeURIComponent(reportingSession.csrf)}`,
+    'x-csrf-token': reportingSession.csrf
   };
   const bulk = body => fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
   try {
@@ -166,6 +174,29 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
     assert.equal(savedCustom.rows[0].value, 'Enterprise');
     const savedTag = await db.query('SELECT workspace_id,tag_id FROM lead_tags WHERE lead_id=$1', [createdLead.id]);
     assert.deepEqual(savedTag.rows, [{ workspace_id: workspaceA, tag_id: newTag }]);
+
+    const editedLeadResponse = await fetch(`${createEndpoint}/${createdLead.id}`, { method:'PATCH', headers, body:JSON.stringify({ status:'Qualified', notes:'Edited through the lead API.' }) });
+    assert.equal(editedLeadResponse.status, 200, await editedLeadResponse.text());
+    const editedLead = await db.query('SELECT status,notes FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceA, createdLead.id]);
+    assert.deepEqual(editedLead.rows[0], { status:'Qualified', notes:'Edited through the lead API.' });
+
+    const searchedLeadsResponse = await fetch(`${createEndpoint}?q=Configured&status=Qualified`, { headers });
+    assert.equal(searchedLeadsResponse.status, 200);
+    const searchedLeads = await searchedLeadsResponse.json();
+    assert.deepEqual(searchedLeads.data.map(lead => lead.id), [createdLead.id]);
+    const workspaceFilteredResponse = await fetch(`${createEndpoint}?q=Workspace&status=New%20Lead`, { headers });
+    assert.equal(workspaceFilteredResponse.status, 200);
+    const workspaceFiltered = await workspaceFilteredResponse.json();
+    assert.deepEqual(workspaceFiltered.data.map(lead => lead.id), [leadA]);
+
+    const deniedCreate = await fetch(createEndpoint, { method:'POST', headers:reportingHeaders, body:JSON.stringify({ firstName:'Reporting Must Not Create' }) });
+    assert.equal(deniedCreate.status, 403);
+    const deniedEdit = await fetch(`${createEndpoint}/${leadA}`, { method:'PATCH', headers:reportingHeaders, body:JSON.stringify({ status:'Reporting Must Not Edit' }) });
+    assert.equal(deniedEdit.status, 403);
+    const unchangedAfterDeniedEdit = await db.query('SELECT status FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceA, leadA]);
+    assert.equal(unchangedAfterDeniedEdit.rows[0].status, 'New Lead');
+    const deniedCreateRow = await db.query("SELECT 1 FROM leads WHERE workspace_id=$1 AND first_name='Reporting Must Not Create'", [workspaceA]);
+    assert.equal(deniedCreateRow.rowCount, 0);
 
     const crossWorkspace = await bulk({ operation: 'tags', leadIds: [leadA, leadB], tagIds: [] });
     assert.equal(crossWorkspace.status, 404);
@@ -236,6 +267,15 @@ test('agent CRM APIs stay scoped to assigned records and self task assignment', 
     const dashboard = (await dashboardResponse.json()).summary;
     assert.equal(Number(dashboard.total_leads), 1);
     assert.equal(Number(dashboard.meetings), 1);
+
+    const assignedLeadsResponse = await fetch(`${base}/leads?q=Owned&status=New%20Lead`, { headers });
+    assert.equal(assignedLeadsResponse.status, 200);
+    const assignedLeads = await assignedLeadsResponse.json();
+    assert.deepEqual(assignedLeads.data.map(item => item.id), [ownedLead]);
+    const peerLeadsResponse = await fetch(`${base}/leads?q=Other&status=New%20Lead`, { headers });
+    assert.equal(peerLeadsResponse.status, 200);
+    const peerLeads = await peerLeadsResponse.json();
+    assert.deepEqual(peerLeads.data, []);
 
     const activitiesResponse = await fetch(`${base}/activities?limit=100`, { headers });
     assert.equal(activitiesResponse.status, 200);
