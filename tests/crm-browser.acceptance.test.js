@@ -29,14 +29,13 @@ test('browser acceptance: operational CRM screens, conversion, editing, read-onl
   const page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));await page.goto(`${origin}/app/`);await page.locator('#appView').waitFor({state:'visible'});return {page,context};
  }
  async function navigate(page,view) {await page.locator(`#mainNav [data-view="${view}"]`).click();await page.locator('#viewRoot h1').waitFor();await page.waitForLoadState('networkidle');assert.ok(!await page.locator('#viewRoot').innerText().then(text=>text.includes('We could not load')));}
-
  async function assertLeadDirectory(role,page) {
   await navigate(page,'leads');
   const leadRow=page.locator('tr').filter({hasText:'Browser Customer'});
   assert.equal(await leadRow.count(),1);
   if(role==='agent') assert.equal(await page.getByText('Unassigned Lead',{exact:false}).count(),0);
   if(['reporting','service'].includes(role)) {
-   for(const selector of ['#savedViewForm','[data-action="select-all-leads"]','[data-action="select-lead"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag','#bulkOwner']) assert.equal(await page.locator(selector).count(),0);
+   for(const selector of ['#savedViewForm','[data-action="select-all-leads"]','[data-action="select-lead"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag','#bulkOwner']) assert.equal(await page.locator(selector).count(),0,`${role} should not see ${selector}`);
    assert.equal(await page.getByRole('button',{name:/New lead/}).count(),0);
    assert.equal(await page.getByRole('button',{name:'Import CSV',exact:true}).count(),0);
    assert.equal(await page.getByRole('link',{name:'Export CSV',exact:true}).count(),1);
@@ -70,20 +69,6 @@ test('browser acceptance: operational CRM screens, conversion, editing, read-onl
    const {page:p,context:c}=await sessionPage(role,role==='agent');
    for(const view of ['contacts','companies','deals','tickets','search','notifications','communications']) {
     await navigate(p,view);
-    if(['reporting','service'].includes(role)) {
-      for(const selector of ['#savedViewForm','[data-action="select-all-leads"]','[data-action="select-lead"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag','#bulkOwner']) assert.equal(await p.locator(selector).count(),0,`${role} should not see ${selector}`);
-      assert.equal(await p.getByRole('button',{name:/New lead/}).count(),0);
-      assert.equal(await p.getByRole('button',{name:'Import CSV',exact:true}).count(),0);
-      assert.equal(await p.getByRole('link',{name:'Export CSV',exact:true}).count(),1);
-      assert.equal(await p.locator('#leadSearch').count(),1);
-      assert.equal(await p.locator('#leadStatus').count(),1);
-      await leadRow.getByRole('button',{name:'Open',exact:true}).click();
-      await p.getByRole('heading',{name:'Browser Customer',exact:true}).waitFor();
-      assert.equal(await p.getByRole('button',{name:'Edit',exact:true}).count(),0);
-      assert.equal(await p.getByRole('button',{name:'Save changes',exact:true}).count(),0);
-      await navigate(p,'leads');
-     }
-    }
     if(['reporting','service'].includes(role)) {assert.equal(await p.getByRole('button',{name:'Create',exact:true}).count(),0);assert.equal(await p.getByRole('button',{name:'Save draft',exact:true}).count(),0);}
    }
    await c.close();
