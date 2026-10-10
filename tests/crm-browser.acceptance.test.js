@@ -34,19 +34,29 @@ test('browser acceptance: operational CRM screens, conversion, editing, read-onl
   const leadRow=page.locator('tr').filter({hasText:'Browser Customer'});
   assert.equal(await leadRow.count(),1);
   if(role==='agent') assert.equal(await page.getByText('Unassigned Lead',{exact:false}).count(),0);
-  if(['reporting','service'].includes(role)) {
-   for(const selector of ['[data-action="select-all-leads"]','[data-action="select-lead"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag','#bulkOwner']) assert.equal(await page.locator(selector).count(),0,`${role} should not see ${selector}`);
+  assert.equal(await page.getByRole('button',{name:/New lead/}).count(),role==='reporting'?0:1);
+  assert.equal(await page.getByRole('button',{name:'Import CSV',exact:true}).count(),role==='reporting'?0:1);
+  assert.equal(await page.getByRole('link',{name:'Export CSV',exact:true}).count(),1);
+  assert.equal(await page.locator('#leadSearch').count(),1);
+  assert.equal(await page.locator('#leadStatus').count(),1);
+  if(role==='reporting') {
+   for(const selector of ['[data-action="select-all-leads"]','[data-action="select-lead"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag','#bulkOwner']) assert.equal(await page.locator(selector).count(),0,'reporting should not see '+selector);
    assert.equal(await page.locator('#savedViewForm').count(),1);
    assert.equal(await page.getByRole('button',{name:'Save view',exact:true}).count(),1);
-   assert.equal(await page.getByRole('button',{name:/New lead/}).count(),0);
-   assert.equal(await page.getByRole('button',{name:'Import CSV',exact:true}).count(),0);
-   assert.equal(await page.getByRole('link',{name:'Export CSV',exact:true}).count(),1);
-   assert.equal(await page.locator('#leadSearch').count(),1);
-   assert.equal(await page.locator('#leadStatus').count(),1);
    await leadRow.getByRole('button',{name:'Open',exact:true}).click();
    await page.getByRole('heading',{name:'Browser Customer',exact:true}).waitFor();
    assert.equal(await page.getByRole('button',{name:'Edit',exact:true}).count(),0);
    assert.equal(await page.getByRole('button',{name:'Save changes',exact:true}).count(),0);
+  }
+  if(role==='service') {
+   for(const selector of ['[data-action="select-all-leads"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag']) assert.ok(await page.locator(selector).count()>0,'service should see '+selector);
+   assert.ok(await page.locator('[data-action="select-lead"]').count()>0);
+   assert.equal(await page.locator('#bulkOwner').count(),0);
+   await leadRow.getByRole('button',{name:'Open',exact:true}).click();
+   await page.getByRole('heading',{name:'Browser Customer',exact:true}).waitFor();
+   assert.equal(await page.getByRole('button',{name:'Edit',exact:true}).count(),1);
+   await page.getByRole('button',{name:'Edit',exact:true}).click();
+   assert.equal(await page.getByRole('button',{name:'Save changes',exact:true}).count(),1);
   }
  }
  try {

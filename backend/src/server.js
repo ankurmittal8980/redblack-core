@@ -945,7 +945,9 @@ export function createRedBlackServer({ db = pool, communicationAdapters = commun
             sendJson(response, 200, { id: result.rows[0].id, restored: true }); return;
           }
           if (request.method === 'POST' && action === 'assign') {
-            requirePermission(context, 'crm:write'); const input = await body(); const userId = uuid(input.userId, 'userId');
+            requirePermission(context, 'crm:write');
+            if (!['owner','admin','manager'].includes(context.role)) throw new HttpError(403, 'OWNER_ASSIGNMENT_FORBIDDEN', 'Your role cannot reassign lead ownership.');
+            const input = await body(); const userId = uuid(input.userId, 'userId');
             const assignment = await transaction(db, async client => {
               const member = await client.query('SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 AND active = true', [workspaceId, userId]);
               if (!member.rows[0]) throw new HttpError(400, 'ASSIGNEE_NOT_IN_WORKSPACE', 'The assignee must be an active workspace member.');
