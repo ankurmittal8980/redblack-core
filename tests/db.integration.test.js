@@ -107,9 +107,11 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   const userId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`bulk-api-${suffix}@example.com`, 'Bulk API Owner'])).rows[0].id;
   const reportingId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`bulk-reporting-${suffix}@example.com`, 'Bulk API Reporting'])).rows[0].id;
   const serviceId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`bulk-service-${suffix}@example.com`, 'Bulk API Service'])).rows[0].id;
+  const managerId = (await db.query('INSERT INTO users(email,display_name) VALUES($1,$2) RETURNING id', [`bulk-manager-${suffix}@example.com`, 'Bulk API Manager'])).rows[0].id;
   await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'owner')", [workspaceA, userId]);
   await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'reporting')", [workspaceA, reportingId]);
   await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'service')", [workspaceA, serviceId]);
+  await db.query("INSERT INTO workspace_members(workspace_id,user_id,role) VALUES($1,$2,'manager')", [workspaceA, managerId]);
   const leadA = (await db.query("INSERT INTO leads(workspace_id,first_name) VALUES($1,'Workspace A Lead') RETURNING id", [workspaceA])).rows[0].id;
   const leadB = (await db.query("INSERT INTO leads(workspace_id,first_name) VALUES($1,'Workspace B Lead') RETURNING id", [workspaceB])).rows[0].id;
   const oldTag = (await db.query("INSERT INTO tags(workspace_id,name) VALUES($1,'Old') RETURNING id", [workspaceA])).rows[0].id;
@@ -127,6 +129,7 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
   const session = await createSession(db, { userId, workspaceId: workspaceA });
   const reportingSession = await createSession(db, { userId: reportingId, workspaceId: workspaceA });
   const serviceSession = await createSession(db, { userId: serviceId, workspaceId: workspaceA });
+  const managerSession = await createSession(db, { userId: managerId, workspaceId: workspaceA });
   const server = createRedBlackServer({ db });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
@@ -145,6 +148,11 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
     'content-type': 'application/json',
     cookie: `rb_session=${encodeURIComponent(serviceSession.token)}; rb_csrf=${encodeURIComponent(serviceSession.csrf)}`,
     'x-csrf-token': serviceSession.csrf
+  };
+  const managerHeaders = {
+    'content-type': 'application/json',
+    cookie: `rb_session=${encodeURIComponent(managerSession.token)}; rb_csrf=${encodeURIComponent(managerSession.csrf)}`,
+    'x-csrf-token': managerSession.csrf
   };
   const bulk = body => fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(body) });
   try {
@@ -242,6 +250,10 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
     assert.equal(serviceState.rows[0].status, 'Service Updated');
     const serviceAssignment = await fetch(`${createEndpoint}/${leadA}/assign`, { method:'POST', headers:serviceHeaders, body:JSON.stringify({ userId }) });
     assert.equal(serviceAssignment.status, 403);
+    const managerAssignment = await fetch(`${createEndpoint}/${leadA}/assign`, { method:'POST', headers:managerHeaders, body:JSON.stringify({ userId }) });
+    assert.equal(managerAssignment.status, 201);
+    const assignedOwner = await db.query('SELECT owner_user_id FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceA, leadA]);
+    assert.equal(assignedOwner.rows[0].owner_user_id, userId);
 
     const crossWorkspace = await bulk({ operation: 'tags', leadIds: [leadA, leadB], tagIds: [] });
     assert.equal(crossWorkspace.status, 404);
