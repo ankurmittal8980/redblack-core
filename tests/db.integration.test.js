@@ -233,7 +233,7 @@ test('bulk CRM API enforces workspace scope and persists tenant keys', { skip: !
     const reportingLeadState = await db.query('SELECT deleted_at FROM leads WHERE workspace_id=$1 AND id=$2', [workspaceA, leadA]);
     assert.equal(reportingLeadState.rows[0].deleted_at, null);
 
-    const serviceCreate = await fetch(createEndpoint, { method:'POST', headers:serviceHeaders, body:JSON.stringify({ firstName:'Service Can Write' }) });
+    const serviceCreate = await fetch(createEndpoint, { method:'POST', headers:serviceHeaders, body:JSON.stringify({ firstName:'Service Can Write', customFields:{ [requiredFieldId]:'Enterprise' } }) });
     assert.equal(serviceCreate.status, 201);
     const serviceLead = await serviceCreate.json();
     const serviceEdit = await fetch(`${createEndpoint}/${serviceLead.id}`, { method:'PATCH', headers:serviceHeaders, body:JSON.stringify({ status:'Service Updated' }) });
