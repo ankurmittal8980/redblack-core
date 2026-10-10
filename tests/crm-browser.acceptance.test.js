@@ -14,6 +14,7 @@ test('browser acceptance: operational CRM screens, conversion, editing, read-onl
  }
  const lead=(await db.query("INSERT INTO leads(workspace_id,first_name,last_name,email) VALUES($1,'Browser','Customer','browser@example.com') RETURNING id",[workspaceId])).rows[0].id;
  await db.query('INSERT INTO lead_assignments(workspace_id,lead_id,user_id) VALUES($1,$2,$3)',[workspaceId,lead,users.agent]);
+ await db.query("INSERT INTO leads(workspace_id,first_name,last_name) VALUES($1,'Unassigned','Lead')",[workspaceId]);
  const company=(await db.query("INSERT INTO companies(workspace_id,name,owner_user_id) VALUES($1,'Browser Company',$2) RETURNING id",[workspaceId,users.owner])).rows[0].id;
  const contact=(await db.query("INSERT INTO contacts(workspace_id,company_id,lead_id,owner_user_id,first_name,last_name) VALUES($1,$2,$3,$4,'Browser','Contact') RETURNING id",[workspaceId,company,lead,users.owner])).rows[0].id;
  const pipeline=(await db.query("INSERT INTO pipelines(workspace_id,name,slug) VALUES($1,'Browser Pipeline',$2) RETURNING id",[workspaceId,`browser-pipeline-${key}`])).rows[0].id;
@@ -27,9 +28,45 @@ test('browser acceptance: operational CRM screens, conversion, editing, read-onl
   await context.addCookies([{name:'rb_session',value:session.token,url:origin,httpOnly:true},{name:'rb_csrf',value:session.csrf,url:origin}]);
   const page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));await page.goto(`${origin}/app/`);await page.locator('#appView').waitFor({state:'visible'});return {page,context};
  }
- async function navigate(page,view) {await page.locator(`#mainNav [data-view="${view}"]`).click();await page.locator('#viewRoot h1').waitFor();await page.waitForLoadState('networkidle');assert.ok(!await page.locator('#viewRoot').innerText().then(text=>text.includes('We could not load')));}
+ async function navigate(page,view) {await page.locator(`#mainNav [data-view="${view}"]`).click();await page.locator('#viewRoot h1').waitFor();await page.waitForLoadState('networkidle');const content=await page.locator('#viewRoot').innerText();assert.ok(!content.includes('We could not load'),`${view} failed: ${content}`);}
+ async function assertLeadDirectory(role,page) {
+  await navigate(page,'leads');
+  const leadRow=page.locator('tr').filter({hasText:'Browser Customer'});
+  assert.equal(await leadRow.count(),1);
+  if(role==='agent') assert.equal(await page.getByText('Unassigned Lead',{exact:false}).count(),0);
+  assert.equal(await page.getByRole('button',{name:/New lead/}).count(),role==='reporting'?0:1);
+  assert.equal(await page.getByRole('button',{name:'Import CSV',exact:true}).count(),role==='reporting'?0:1);
+  assert.equal(await page.getByRole('link',{name:'Export CSV',exact:true}).count(),1);
+  assert.equal(await page.locator('#leadSearch').count(),1);
+  assert.equal(await page.locator('#leadStatus').count(),1);
+  if(role==='reporting') {
+   for(const selector of ['[data-action="select-all-leads"]','[data-action="select-lead"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag','#bulkOwner']) assert.equal(await page.locator(selector).count(),0,'reporting should not see '+selector);
+   assert.equal(await page.locator('#savedViewForm').count(),1);
+   assert.equal(await page.getByRole('button',{name:'Save view',exact:true}).count(),1);
+   await leadRow.getByRole('button',{name:'Open',exact:true}).click();
+   await page.getByRole('heading',{name:'Browser Customer',exact:true}).waitFor();
+   assert.equal(await page.getByRole('button',{name:'Edit',exact:true}).count(),0);
+   assert.equal(await page.getByRole('button',{name:'Save changes',exact:true}).count(),0);
+  }
+  if(role==='service') {
+   for(const selector of ['[data-action="select-all-leads"]','[data-action="bulk-trash"]','#bulkStatus','#bulkStage','#bulkTag']) assert.ok(await page.locator(selector).count()>0,'service should see '+selector);
+   assert.ok(await page.locator('[data-action="select-lead"]').count()>0);
+   assert.equal(await page.locator('#bulkOwner').count(),0);
+   await leadRow.getByRole('button',{name:'Open',exact:true}).click();
+   await page.getByRole('heading',{name:'Browser Customer',exact:true}).waitFor();
+   assert.equal(await page.getByRole('button',{name:'Edit',exact:true}).count(),1);
+   await page.getByRole('button',{name:'Edit',exact:true}).click();
+   assert.equal(await page.getByRole('button',{name:'Save changes',exact:true}).count(),1);
+  }
+ }
  try {
+  for(const role of ['admin','manager','agent','reporting','service']) {
+   const {page:p,context:c}=await sessionPage(role,role==='agent');
+   await assertLeadDirectory(role,p);
+   await c.close();
+  }
   const {page,context}=await sessionPage('owner');
+  await assertLeadDirectory('owner',page);
   await navigate(page,'companies');assert.ok((await page.getByRole('button',{name:'Browser Company',exact:true}).count())>0);await page.getByRole('button',{name:'Browser Company',exact:true}).click();await page.getByText('Activity / history',{exact:true}).waitFor();
   await navigate(page,'contacts');assert.ok((await page.getByRole('button',{name:'Browser Contact',exact:true}).count())>0);
   await navigate(page,'deals');assert.ok((await page.getByRole('button',{name:'Browser Deal',exact:true}).count())>0);await page.getByRole('button',{name:'Browser Deal',exact:true}).click();await page.getByText('Activity / history',{exact:true}).waitFor();
